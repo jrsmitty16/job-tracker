@@ -1,0 +1,6 @@
+feedparser>=6.0
+requests>=2.31
+pyyaml>=6.0
+plyer>=2.1
+beautifulsoup4>=4.12
+lxml>=5.0

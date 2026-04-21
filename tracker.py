@@ -1,0 +1,853 @@
+#!/usr/bin/env python3
+"""
+Job Board Tracker
+Monitors multiple job boards for new postings and sends notifications.
+"""
+
+import psycopg2
+import feedparser
+import requests
+import smtplib
+import yaml
+import hashlib
+import logging
+import time
+import json
+import calendar
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from urllib.parse import quote_plus
+import email.utils as _email_utils
+
+BASE_DIR = Path(__file__).parent
+CONFIG_PATH = BASE_DIR / "config.yaml"
+LOG_PATH = BASE_DIR / "tracker.log"
+REPORT_PATH = BASE_DIR / "latest_jobs.html"
+STATE_PATH = BASE_DIR / "state.json"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_PATH, encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# State (tracks last email timestamp across runs)
+# ---------------------------------------------------------------------------
+
+def load_state() -> dict:
+    if STATE_PATH.exists():
+        try:
+            return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def save_state(state: dict):
+    STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Date parsing
+# ---------------------------------------------------------------------------
+
+def parse_date(value) -> datetime | None:
+    """Parse a date from any common format into a timezone-aware datetime."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    # feedparser returns published_parsed as time.struct_time
+    if hasattr(value, "tm_year"):
+        return datetime.fromtimestamp(calendar.timegm(value), tz=timezone.utc)
+    s = str(value).strip()
+    # ISO 8601 variants
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(s[: len(fmt)], fmt)
+            return dt.replace(tzinfo=timezone.utc) if not dt.tzinfo else dt
+        except ValueError:
+            continue
+    # RFC 2822 (used by RSS feeds)
+    try:
+        return _email_utils.parsedate_to_datetime(s)
+    except Exception:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Database
+# ---------------------------------------------------------------------------
+
+def init_db():
+    from db import get_conn
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS seen_jobs (
+            id                TEXT PRIMARY KEY,
+            campaign          TEXT,
+            title             TEXT,
+            company           TEXT,
+            location          TEXT,
+            url               TEXT,
+            source            TEXT,
+            found_at          TEXT,
+            posted_at         TEXT,
+            status            TEXT DEFAULT 'New',
+            status_updated_at TEXT,
+            score             INTEGER DEFAULT 0
+        )
+    """)
+    for col, definition in [
+        ("posted_at",         "TEXT"),
+        ("status",            "TEXT DEFAULT 'New'"),
+        ("status_updated_at", "TEXT"),
+        ("score",             "INTEGER DEFAULT 0"),
+    ]:
+        cur.execute(f"ALTER TABLE seen_jobs ADD COLUMN IF NOT EXISTS {col} {definition}")
+    conn.commit()
+    cur.close()
+    return conn
+
+
+def job_fingerprint(title: str, company: str, url: str) -> str:
+    key = f"{title.lower()}|{company.lower()}|{url.lower()}"
+    return hashlib.md5(key.encode()).hexdigest()
+
+
+def is_new(conn, jid: str) -> bool:
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM seen_jobs WHERE id=%s", (jid,))
+    result = cur.fetchone()
+    cur.close()
+    return result is None
+
+
+# ---------------------------------------------------------------------------
+# Relevance Scoring (based on Corey's resume profile)
+# ---------------------------------------------------------------------------
+
+CAMPAIGN_SCORE_KEYWORDS: dict[str, dict[str, int]] = {
+    "Technical Recruiter & Talent Acquisition": {
+        "genai": 3, "generative ai": 3, "llm": 2, "ai": 2, "ml": 2,
+        "machine learning": 2, "artificial intelligence": 2,
+        "technical": 1, "senior": 1, "lead": 1, "head of": 2,
+        "director": 1, "startup": 1, "saas": 1, "embedded": 2,
+        "full cycle": 1, "full-cycle": 1, "deep tech": 2, "series": 1,
+    },
+    "AI Operations": {
+        "llmops": 3, "llm": 3, "genai": 3, "generative ai": 3,
+        "agentic": 3, "ai agent": 3, "ai agents": 3,
+        "prompt engineer": 3, "ai ops": 3, "aiops": 3,
+        "ai operations": 3, "ai platform": 2, "ai infrastructure": 2,
+        "senior": 1, "lead": 1, "head": 2,
+    },
+}
+
+
+def score_job(title: str, company: str, campaign: str) -> int:
+    text = f"{title} {company}".lower()
+    keywords = CAMPAIGN_SCORE_KEYWORDS.get(campaign, {})
+    total = sum(w for kw, w in keywords.items() if kw in text)
+    return min(5, max(1, total))
+
+
+def save_job(conn, jid, campaign, title, company, location, url, source, posted_at=None):
+    job_score = score_job(title, company, campaign)
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO seen_jobs
+           (id, campaign, title, company, location, url, source,
+            found_at, posted_at, status, status_updated_at, score)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           ON CONFLICT (id) DO NOTHING""",
+        (jid, campaign, title, company, location, url, source,
+         datetime.now(timezone.utc).isoformat(),
+         posted_at.isoformat() if posted_at else None,
+         "New", None, job_score),
+    )
+    conn.commit()
+    cur.close()
+
+
+def load_all_jobs(conn):
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT campaign, title, company, location, url, source, found_at, posted_at, "
+        "COALESCE(status,'New') as status, COALESCE(score,0) as score "
+        "FROM seen_jobs ORDER BY score DESC, found_at DESC LIMIT 500"
+    )
+    rows = cur.fetchall()
+    cur.close()
+    return rows
+
+
+def get_pipeline_summary(conn) -> dict:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COALESCE(status,'New'), COUNT(*) FROM seen_jobs "
+        "WHERE COALESCE(status,'New') != 'Not a Fit' "
+        "GROUP BY COALESCE(status,'New')"
+    )
+    rows = cur.fetchall()
+    cur.close()
+    return dict(rows)
+
+
+def get_weekly_stats(conn, since: datetime) -> dict:
+    since_str = since.isoformat()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT campaign, COUNT(*) FROM seen_jobs WHERE found_at >= %s GROUP BY campaign",
+        (since_str,)
+    )
+    new_this_week = cur.fetchall()
+    cur.execute(
+        "SELECT title, company, url, status_updated_at FROM seen_jobs "
+        "WHERE status='Applied' AND status_updated_at >= %s ORDER BY status_updated_at DESC",
+        (since_str,)
+    )
+    applied = cur.fetchall()
+    cur.execute("SELECT title, company, url FROM seen_jobs WHERE status='Interviewing'")
+    interviewing = cur.fetchall()
+    cur.close()
+    return {
+        "new_by_campaign": dict(new_this_week),
+        "applied":         list(applied),
+        "interviewing":    list(interviewing),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Job Board Sources
+# ---------------------------------------------------------------------------
+
+HEADERS = {"User-Agent": "JobTracker/1.0 (personal job search tool)"}
+
+
+def fetch_indeed(query: str, max_age_days: int = 3) -> list[dict]:
+    url = (
+        f"https://www.indeed.com/rss?q={quote_plus(query)}"
+        f"&sort=date&fromage={max_age_days}"
+    )
+    try:
+        feed = feedparser.parse(url)
+        jobs = []
+        for e in feed.entries:
+            company = ""
+            if hasattr(e, "source") and isinstance(e.source, dict):
+                company = e.source.get("title", "")
+            location = getattr(e, "indeed_city", "") or ""
+            if getattr(e, "indeed_country", ""):
+                location = f"{location}, {e.indeed_country}".strip(", ")
+            jobs.append({
+                "title":     e.get("title", "").split(" - ")[0].strip(),
+                "company":   company,
+                "location":  location,
+                "url":       e.get("link", ""),
+                "source":    "Indeed",
+                "posted_at": parse_date(e.get("published_parsed")),
+            })
+        log.info(f"  Indeed     '{query}': {len(jobs)} results")
+        return jobs
+    except Exception as exc:
+        log.warning(f"  Indeed fetch failed for '{query}': {exc}")
+        return []
+
+
+def fetch_remoteok(query: str) -> list[dict]:
+    tag = query.lower().replace(" ", "-")
+    url = f"https://remoteok.com/api?tag={quote_plus(tag)}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        data = resp.json()
+        jobs = []
+        for item in data[1:]:
+            if isinstance(item, dict) and item.get("position"):
+                jobs.append({
+                    "title":     item.get("position", ""),
+                    "company":   item.get("company", ""),
+                    "location":  item.get("location", "Remote"),
+                    "url":       item.get("url") or f"https://remoteok.com/jobs/{item.get('id','')}",
+                    "source":    "RemoteOK",
+                    "posted_at": parse_date(item.get("date")),
+                })
+        log.info(f"  RemoteOK   '{query}': {len(jobs)} results")
+        return jobs
+    except Exception as exc:
+        log.warning(f"  RemoteOK fetch failed for '{query}': {exc}")
+        return []
+
+
+def fetch_arbeitnow(query: str) -> list[dict]:
+    url = f"https://www.arbeitnow.com/api/job-board-api?search={quote_plus(query)}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        data = resp.json()
+        jobs = []
+        for item in data.get("data", []):
+            jobs.append({
+                "title":     item.get("title", ""),
+                "company":   item.get("company_name", ""),
+                "location":  item.get("location", ""),
+                "url":       item.get("url", ""),
+                "source":    "Arbeitnow",
+                "posted_at": parse_date(item.get("created_at")),
+            })
+        log.info(f"  Arbeitnow  '{query}': {len(jobs)} results")
+        return jobs
+    except Exception as exc:
+        log.warning(f"  Arbeitnow fetch failed for '{query}': {exc}")
+        return []
+
+
+def fetch_weworkremotely(query: str) -> list[dict]:
+    url = "https://weworkremotely.com/remote-jobs.rss"
+    try:
+        feed = feedparser.parse(url)
+        q_lower = query.lower()
+        jobs = []
+        for e in feed.entries:
+            title = e.get("title", "")
+            if q_lower in title.lower():
+                company = ""
+                if " at " in title:
+                    company = title.split(" at ")[-1].strip()
+                    title = title.split(" at ")[0].strip()
+                jobs.append({
+                    "title":     title,
+                    "company":   company,
+                    "location":  "Remote",
+                    "url":       e.get("link", ""),
+                    "source":    "WeWorkRemotely",
+                    "posted_at": parse_date(e.get("published_parsed")),
+                })
+        log.info(f"  WWR        '{query}': {len(jobs)} results")
+        return jobs
+    except Exception as exc:
+        log.warning(f"  WWR fetch failed for '{query}': {exc}")
+        return []
+
+
+def fetch_linkedin(query: str) -> list[dict]:
+    url = (
+        "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+        f"?keywords={quote_plus(query)}&location=United+States&f_TPR=r86400&start=0"
+    )
+    browser_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        from bs4 import BeautifulSoup
+        resp = requests.get(url, headers=browser_headers, timeout=15)
+        soup = BeautifulSoup(resp.text, "lxml")
+        jobs = []
+        for card in soup.find_all("div", class_="base-card"):
+            title_el   = card.find("h3", class_="base-search-card__title")
+            company_el = card.find("h4", class_="base-search-card__subtitle")
+            loc_el     = card.find("span", class_="job-search-card__location")
+            link_el    = card.find("a", class_="base-card__full-link")
+            time_el    = card.find("time")
+            if title_el and link_el:
+                posted = parse_date(time_el.get("datetime") if time_el else None)
+                jobs.append({
+                    "title":     title_el.get_text(strip=True),
+                    "company":   company_el.get_text(strip=True) if company_el else "",
+                    "location":  loc_el.get_text(strip=True) if loc_el else "",
+                    "url":       link_el.get("href", "").split("?")[0],
+                    "source":    "LinkedIn",
+                    "posted_at": posted,
+                })
+        log.info(f"  LinkedIn   '{query}': {len(jobs)} results")
+        return jobs
+    except Exception as exc:
+        log.warning(f"  LinkedIn fetch failed for '{query}': {exc}")
+        return []
+
+
+def fetch_himalayas(query: str) -> list[dict]:
+    """Fetch from Himalayas — startup/remote-focused job board with free API."""
+    url = "https://himalayas.app/jobs/api/search"
+    try:
+        resp = requests.get(url, params={"q": query, "sort": "recent", "limit": 20},
+                            headers=HEADERS, timeout=15)
+        data = resp.json()
+        jobs = []
+        for item in data.get("jobs", []):
+            location = item.get("locationRestrictions", "Remote")
+            if isinstance(location, list):
+                location = ", ".join(location) if location else "Remote"
+            jobs.append({
+                "title":     item.get("title", ""),
+                "company":   item.get("companyName", ""),
+                "location":  location,
+                "url":       item.get("applicationLink", ""),
+                "source":    "Himalayas",
+                "posted_at": parse_date(item.get("pubDate")),
+            })
+        log.info(f"  Himalayas  '{query}': {len(jobs)} results")
+        return jobs
+    except Exception as exc:
+        log.warning(f"  Himalayas fetch failed for '{query}': {exc}")
+        return []
+
+
+def fetch_remotive(query: str) -> list[dict]:
+    """Fetch from Remotive — remote tech jobs with free API (rate-limited)."""
+    url = "https://remotive.com/api/remote-jobs"
+    try:
+        resp = requests.get(url, params={"search": query, "limit": 10},
+                            headers=HEADERS, timeout=15)
+        data = resp.json()
+        jobs = []
+        for item in data.get("jobs", []):
+            jobs.append({
+                "title":     item.get("title", ""),
+                "company":   item.get("company_name", ""),
+                "location":  item.get("candidate_required_location", "Remote"),
+                "url":       item.get("url", ""),
+                "source":    "Remotive",
+                "posted_at": parse_date(item.get("publication_date")),
+            })
+        log.info(f"  Remotive   '{query}': {len(jobs)} results")
+        return jobs
+    except Exception as exc:
+        log.warning(f"  Remotive fetch failed for '{query}': {exc}")
+        return []
+
+
+SOURCES = [fetch_indeed, fetch_linkedin, fetch_himalayas, fetch_remotive,
+           fetch_remoteok, fetch_arbeitnow, fetch_weworkremotely]
+
+
+# ---------------------------------------------------------------------------
+# Filtering
+# ---------------------------------------------------------------------------
+
+def passes_filters(job: dict, filters: dict) -> tuple[bool, str]:
+    title    = job.get("title", "").lower()
+    location = job.get("location", "").lower()
+
+    # Title must contain at least one include keyword
+    must_include = [k.lower() for k in filters.get("title_must_include", [])]
+    if must_include and not any(kw in title for kw in must_include):
+        return False, f"title '{job['title']}' missing required keywords"
+
+    # Title must not contain any exclude keyword
+    for kw in [k.lower() for k in filters.get("title_must_exclude", [])]:
+        if kw in title:
+            return False, f"title '{job['title']}' blocked by '{kw}'"
+
+    # Location must match allowed list (empty location gets benefit of the doubt)
+    allowed = [loc.lower() for loc in filters.get("location_allow", [])]
+    if allowed and location and not any(loc in location for loc in allowed):
+        return False, f"location '{job['location']}' not in allowed list"
+
+    return True, ""
+
+
+# ---------------------------------------------------------------------------
+# Campaign Runner
+# ---------------------------------------------------------------------------
+
+def run_campaign(campaign_name: str, queries: list[str], filters: dict) -> list[dict]:
+    all_jobs: list[dict] = []
+    seen_urls: set[str] = set()
+    filtered_count = 0
+
+    for query in queries:
+        log.info(f"Querying '{query}'...")
+        for source_fn in SOURCES:
+            for job in source_fn(query):
+                url = job.get("url", "")
+                if not url or url in seen_urls:
+                    continue
+                ok, reason = passes_filters(job, filters)
+                if not ok:
+                    filtered_count += 1
+                    log.debug(f"  FILTERED: {reason}")
+                    continue
+                seen_urls.add(url)
+                job["campaign"] = campaign_name
+                all_jobs.append(job)
+            time.sleep(0.75)
+
+    log.info(f"  Filtered out {filtered_count} irrelevant results")
+    return all_jobs
+
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+
+def send_email(config: dict, jobs_by_campaign: dict[str, list[dict]], last_email_at: datetime | None):
+    cfg = config.get("email", {})
+    if not cfg.get("enabled"):
+        return False
+
+    # Only include jobs posted after the last email was sent
+    if last_email_at:
+        filtered = {}
+        for campaign, jobs in jobs_by_campaign.items():
+            fresh = []
+            for job in jobs:
+                posted = job.get("posted_at")
+                # No date available → include it (benefit of the doubt)
+                if posted is None or posted >= last_email_at:
+                    fresh.append(job)
+                else:
+                    log.debug(f"  DATE FILTERED: '{job['title']}' posted {posted.date()} before last email")
+            filtered[campaign] = fresh
+        jobs_by_campaign = filtered
+
+    total = sum(len(j) for j in jobs_by_campaign.values())
+    if total == 0:
+        log.info("No jobs newer than last email — skipping send")
+        return False
+
+    now_str = datetime.now().strftime("%a %b %d %H:%M")
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"[Job Tracker] {total} new job(s) — {now_str}"
+    msg["From"]    = cfg["username"]
+    msg["To"]      = cfg.get("to", cfg["username"])
+
+    html = ["<html><body style='font-family:Arial,sans-serif;max-width:800px;margin:auto'>"]
+    html.append(f"<h1 style='color:#2c3e50'>Job Tracker &mdash; {total} New Posting(s)</h1>")
+    if last_email_at:
+        html.append(f"<p style='color:#666'>Jobs posted since last email: {last_email_at.strftime('%b %d at %H:%M')}</p>")
+
+    for campaign, jobs in jobs_by_campaign.items():
+        if not jobs:
+            continue
+        html.append(
+            f"<h2 style='color:#2980b9;border-bottom:2px solid #2980b9;padding-bottom:4px'>"
+            f"{campaign} <span style='font-size:14px;color:#666'>({len(jobs)} new)</span></h2>"
+        )
+        html.append("<table style='width:100%;border-collapse:collapse'>")
+        html.append(
+            "<tr style='background:#ecf0f1'>"
+            "<th style='text-align:left;padding:8px'>Title</th>"
+            "<th style='text-align:left;padding:8px'>Company</th>"
+            "<th style='text-align:left;padding:8px'>Location</th>"
+            "<th style='text-align:left;padding:8px'>Posted</th>"
+            "<th style='text-align:left;padding:8px'>Source</th></tr>"
+        )
+        for i, job in enumerate(jobs):
+            bg = "#fff" if i % 2 == 0 else "#f9f9f9"
+            posted_str = job["posted_at"].strftime("%b %d") if job.get("posted_at") else ""
+            html.append(
+                f"<tr style='background:{bg}'>"
+                f"<td style='padding:8px'><a href='{job['url']}' style='color:#2980b9'>{job['title']}</a></td>"
+                f"<td style='padding:8px'>{job.get('company','')}</td>"
+                f"<td style='padding:8px'>{job.get('location','')}</td>"
+                f"<td style='padding:8px;color:#666'>{posted_str}</td>"
+                f"<td style='padding:8px;color:#999'>{job.get('source','')}</td>"
+                f"</tr>"
+            )
+        html.append("</table><br>")
+
+    html.append("<p style='color:#999;font-size:12px'>Sent by Job Tracker &mdash; running on your machine</p>")
+    html.append("</body></html>")
+    msg.attach(MIMEText("\n".join(html), "html"))
+
+    try:
+        smtp_host = cfg.get("smtp_host", "smtp.gmail.com")
+        smtp_port = cfg.get("smtp_port", 587)
+        with smtplib.SMTP(smtp_host, smtp_port) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.login(cfg["username"], cfg["password"])
+            smtp.send_message(msg)
+        log.info(f"Email sent — {total} new jobs to {msg['To']}")
+        return True
+    except Exception as exc:
+        log.error(f"Email failed: {exc}")
+        return False
+
+
+def send_desktop_notification(title: str, message: str):
+    try:
+        from plyer import notification
+        notification.notify(title=title, message=message, app_name="Job Tracker", timeout=10)
+    except Exception as exc:
+        log.debug(f"Desktop notification skipped: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# HTML Report
+# ---------------------------------------------------------------------------
+
+STATUS_COLORS = {
+    "New":               "#3498db",
+    "Applied":           "#e67e22",
+    "Interviewing":      "#27ae60",
+    "Offer":             "#f1c40f",
+    "Rejected/Passed":   "#95a5a6",
+}
+
+def write_html_report(conn):
+    rows     = load_all_jobs(conn)
+    pipeline = get_pipeline_summary(conn)
+    campaigns = sorted({r[0] for r in rows})
+
+    html = ["""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>Job Tracker Dashboard</title>
+<style>
+  body{font-family:Arial,sans-serif;max-width:1200px;margin:40px auto;padding:0 20px;color:#333}
+  h1{color:#2c3e50} h2{color:#2980b9;border-bottom:2px solid #2980b9;padding-bottom:4px;margin-top:30px}
+  table{width:100%;border-collapse:collapse;margin-bottom:30px}
+  th{background:#2980b9;color:#fff;padding:10px;text-align:left}
+  tr:nth-child(even){background:#f9f9f9} tr:hover{background:#eaf4ff}
+  td{padding:9px;border-bottom:1px solid #eee}
+  a{color:#2980b9;text-decoration:none} a:hover{text-decoration:underline}
+  .badge{color:#fff;padding:3px 9px;border-radius:12px;font-size:12px;font-weight:bold}
+  .source{color:#999;font-size:12px}
+  .pipeline{display:flex;gap:16px;margin:20px 0}
+  .pip-box{padding:14px 22px;border-radius:8px;color:#fff;text-align:center;min-width:100px}
+  .pip-box .count{font-size:28px;font-weight:bold}
+  .pip-box .label{font-size:12px;opacity:.9}
+  .filters{margin-bottom:12px}
+  .filters button{margin-right:6px;padding:5px 14px;border:1px solid #ccc;border-radius:4px;
+    cursor:pointer;background:#fff;font-size:13px}
+  .filters button.active{background:#2980b9;color:#fff;border-color:#2980b9}
+</style>
+<script>
+function filterStatus(status) {
+  document.querySelectorAll('tr[data-status]').forEach(r => {
+    r.style.display = (!status || r.dataset.status === status) ? '' : 'none';
+  });
+  document.querySelectorAll('.filters button').forEach(b => {
+    b.classList.toggle('active', b.dataset.filter === status);
+  });
+}
+</script>
+</head><body>"""]
+
+    html.append("<h1>Job Tracker Dashboard</h1>")
+    html.append(
+        f"<p style='color:#666'>Last updated: {datetime.now().strftime('%A, %B %d %Y at %H:%M')}"
+        f" &nbsp;|&nbsp; {len(rows)} total jobs tracked</p>"
+    )
+
+    # Pipeline summary boxes
+    html.append("<div class='pipeline'>")
+    for status, color in STATUS_COLORS.items():
+        count = pipeline.get(status, 0)
+        html.append(
+            f"<div class='pip-box' style='background:{color}'>"
+            f"<div class='count'>{count}</div>"
+            f"<div class='label'>{status}</div></div>"
+        )
+    html.append("</div>")
+
+    # Filter buttons
+    html.append("<div class='filters'>")
+    html.append("<strong>Filter: </strong>")
+    html.append("<button onclick=\"filterStatus('')\" data-filter=''>All</button>")
+    for status in STATUS_COLORS:
+        html.append(f"<button onclick=\"filterStatus('{status}')\" data-filter='{status}'>{status}</button>")
+    html.append("</div>")
+
+    for campaign in campaigns:
+        campaign_rows = [r for r in rows if r[0] == campaign]
+        html.append(f"<h2>{campaign} <span style='font-size:14px;color:#666'>({len(campaign_rows)} jobs)</span></h2>")
+        html.append(
+            "<table><tr><th>Title</th><th>Company</th><th>Location</th>"
+            "<th>Posted</th><th>Status</th><th>Source</th></tr>"
+        )
+        for r in campaign_rows:
+            _, title, company, location, url, source, found_at, posted_at, status = r
+            posted_str  = posted_at[:10] if posted_at else ""
+            color       = STATUS_COLORS.get(status, "#3498db")
+            html.append(
+                f"<tr data-status='{status}'>"
+                f"<td><a href='{url}' target='_blank'>{title}</a></td>"
+                f"<td>{company}</td><td>{location}</td>"
+                f"<td>{posted_str}</td>"
+                f"<td><span class='badge' style='background:{color}'>{status}</span></td>"
+                f"<td class='source'>{source}</td></tr>"
+            )
+        html.append("</table>")
+
+    html.append("</body></html>")
+    REPORT_PATH.write_text("\n".join(html), encoding="utf-8")
+    log.info(f"HTML report written -> {REPORT_PATH}")
+
+
+# ---------------------------------------------------------------------------
+# Weekly Digest
+# ---------------------------------------------------------------------------
+
+def send_weekly_digest(config: dict, conn, since: datetime):
+    cfg = config.get("email", {})
+    if not cfg.get("enabled"):
+        return False
+
+    stats    = get_weekly_stats(conn, since)
+    pipeline = get_pipeline_summary(conn)
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"[Job Tracker] Weekly Digest — week of {since.strftime('%b %d')}"
+    msg["From"]    = cfg["username"]
+    msg["To"]      = cfg.get("to", cfg["username"])
+
+    html = ["<html><body style='font-family:Arial,sans-serif;max-width:700px;margin:auto;color:#333'>"]
+    html.append(f"<h1 style='color:#2c3e50'>Weekly Job Search Digest</h1>")
+    html.append(f"<p style='color:#666'>Week of {since.strftime('%B %d')} &mdash; {datetime.now().strftime('%B %d, %Y')}</p>")
+
+    # Pipeline
+    html.append("<h2 style='color:#2980b9'>Pipeline Summary</h2>")
+    html.append("<table style='border-collapse:collapse;width:300px'>")
+    for status, color in STATUS_COLORS.items():
+        count = pipeline.get(status, 0)
+        html.append(
+            f"<tr><td style='padding:7px 12px'>"
+            f"<span style='background:{color};color:#fff;padding:2px 10px;border-radius:10px;font-size:12px'>{status}</span>"
+            f"</td><td style='padding:7px;font-size:20px;font-weight:bold'>{count}</td></tr>"
+        )
+    html.append("</table>")
+
+    # New jobs found
+    html.append("<h2 style='color:#2980b9'>New Jobs Found This Week</h2>")
+    if stats["new_by_campaign"]:
+        html.append("<ul>")
+        for campaign, count in stats["new_by_campaign"].items():
+            html.append(f"<li><strong>{campaign}:</strong> {count} new postings</li>")
+        html.append("</ul>")
+    else:
+        html.append("<p style='color:#666'>No new jobs found this week.</p>")
+
+    # Applied this week
+    html.append("<h2 style='color:#2980b9'>Applied This Week</h2>")
+    if stats["applied"]:
+        html.append("<ul>")
+        for title, company, url, updated_at in stats["applied"]:
+            date_str = updated_at[:10] if updated_at else ""
+            html.append(f"<li><a href='{url}'>{title}</a> at {company} &mdash; {date_str}</li>")
+        html.append("</ul>")
+    else:
+        html.append("<p style='color:#666'>No applications logged this week.</p>")
+
+    # Currently interviewing
+    if stats["interviewing"]:
+        html.append("<h2 style='color:#27ae60'>Currently Interviewing</h2><ul>")
+        for title, company, url in stats["interviewing"]:
+            html.append(f"<li><a href='{url}'>{title}</a> at {company}</li>")
+        html.append("</ul>")
+
+    html.append("<p style='color:#999;font-size:12px;margin-top:30px'>Sent by Job Tracker &mdash; running on your machine</p>")
+    html.append("</body></html>")
+    msg.attach(MIMEText("\n".join(html), "html"))
+
+    try:
+        smtp_host = cfg.get("smtp_host", "smtp.gmail.com")
+        smtp_port = cfg.get("smtp_port", 587)
+        with smtplib.SMTP(smtp_host, smtp_port) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.login(cfg["username"], cfg["password"])
+            smtp.send_message(msg)
+        log.info(f"Weekly digest sent to {msg['To']}")
+        return True
+    except Exception as exc:
+        log.error(f"Weekly digest failed: {exc}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def run():
+    log.info("=" * 60)
+    log.info("Job Tracker starting")
+
+    config = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    conn   = init_db()
+    state  = load_state()
+
+    last_email_at: datetime | None = parse_date(state.get("last_email_at"))
+    if last_email_at:
+        log.info(f"Last email sent: {last_email_at.strftime('%Y-%m-%d %H:%M UTC')}")
+    else:
+        log.info("No previous email on record — all qualifying jobs will be included")
+
+    campaigns: dict = config.get("campaigns", {})
+    new_jobs_by_campaign: dict[str, list[dict]] = {}
+
+    for campaign_name, campaign_cfg in campaigns.items():
+        queries: list[str] = campaign_cfg.get("queries", [])
+        filters: dict      = campaign_cfg.get("filters", {})
+        log.info(f"--- Campaign: {campaign_name} ---")
+
+        candidates = run_campaign(campaign_name, queries, filters)
+        new_jobs   = []
+
+        for job in candidates:
+            jid = job_fingerprint(job["title"], job.get("company", ""), job["url"])
+            if is_new(conn, jid):
+                save_job(
+                    conn, jid, campaign_name,
+                    job["title"], job.get("company", ""),
+                    job.get("location", ""), job["url"], job["source"],
+                    job.get("posted_at"),
+                )
+                new_jobs.append(job)
+
+        new_jobs_by_campaign[campaign_name] = new_jobs
+        log.info(f"  -> {len(new_jobs)} NEW jobs (of {len(candidates)} found)")
+
+    total_new = sum(len(j) for j in new_jobs_by_campaign.values())
+
+    if total_new > 0:
+        sent = send_email(config, new_jobs_by_campaign, last_email_at)
+        if sent:
+            state["last_email_at"] = datetime.now(timezone.utc).isoformat()
+            save_state(state)
+
+        for campaign, jobs in new_jobs_by_campaign.items():
+            if jobs:
+                send_desktop_notification(
+                    f"Job Tracker: {len(jobs)} new",
+                    f"{campaign}\n{', '.join(j['title'] for j in jobs[:3])}"
+                    f"{'...' if len(jobs) > 3 else ''}",
+                )
+
+    # Weekly digest — send if 7+ days since last one
+    last_digest_at: datetime | None = parse_date(state.get("last_digest_at"))
+    weekly_due = (
+        last_digest_at is None or
+        (datetime.now(timezone.utc) - last_digest_at) >= timedelta(days=7)
+    )
+    if weekly_due:
+        since = last_digest_at or (datetime.now(timezone.utc) - timedelta(days=7))
+        log.info("Sending weekly digest...")
+        sent = send_weekly_digest(config, conn, since)
+        if sent:
+            state["last_digest_at"] = datetime.now(timezone.utc).isoformat()
+            save_state(state)
+
+    write_html_report(conn)
+    conn.close()
+    log.info(f"Done. {total_new} new jobs found this run.")
+    log.info("=" * 60)
+
+
+if __name__ == "__main__":
+    run()
