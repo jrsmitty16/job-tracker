@@ -20,6 +20,15 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from urllib.parse import quote_plus
 import email.utils as _email_utils
+import re
+
+
+def strip_html(html: str) -> str:
+    """Strip HTML tags and return plain text."""
+    if not html:
+        return ""
+    text = re.sub(r"<[^>]+>", " ", html)
+    return re.sub(r"\s+", " ", text).strip()
 
 BASE_DIR = Path(__file__).parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
@@ -267,13 +276,16 @@ def fetch_remoteok(query: str) -> list[dict]:
         jobs = []
         for item in data[1:]:
             if isinstance(item, dict) and item.get("position"):
+                tags = item.get("tags", [])
+                tag_text = " ".join(tags) if isinstance(tags, list) else ""
                 jobs.append({
-                    "title":     item.get("position", ""),
-                    "company":   item.get("company", ""),
-                    "location":  item.get("location", "Remote"),
-                    "url":       item.get("url") or f"https://remoteok.com/jobs/{item.get('id','')}",
-                    "source":    "RemoteOK",
-                    "posted_at": parse_date(item.get("date")),
+                    "title":       item.get("position", ""),
+                    "company":     item.get("company", ""),
+                    "location":    item.get("location", "Remote"),
+                    "url":         item.get("url") or f"https://remoteok.com/jobs/{item.get('id','')}",
+                    "source":      "RemoteOK",
+                    "posted_at":   parse_date(item.get("date")),
+                    "description": strip_html(item.get("description", "")) + " " + tag_text,
                 })
         log.info(f"  RemoteOK   '{query}': {len(jobs)} results")
         return jobs
@@ -290,12 +302,13 @@ def fetch_arbeitnow(query: str) -> list[dict]:
         jobs = []
         for item in data.get("data", []):
             jobs.append({
-                "title":     item.get("title", ""),
-                "company":   item.get("company_name", ""),
-                "location":  item.get("location", ""),
-                "url":       item.get("url", ""),
-                "source":    "Arbeitnow",
-                "posted_at": parse_date(item.get("created_at")),
+                "title":       item.get("title", ""),
+                "company":     item.get("company_name", ""),
+                "location":    item.get("location", ""),
+                "url":         item.get("url", ""),
+                "source":      "Arbeitnow",
+                "posted_at":   parse_date(item.get("created_at")),
+                "description": strip_html(item.get("description", "")),
             })
         log.info(f"  Arbeitnow  '{query}': {len(jobs)} results")
         return jobs
@@ -410,12 +423,13 @@ def fetch_remotive(query: str) -> list[dict]:
         jobs = []
         for item in data.get("jobs", []):
             jobs.append({
-                "title":     item.get("title", ""),
-                "company":   item.get("company_name", ""),
-                "location":  item.get("candidate_required_location", "Remote"),
-                "url":       item.get("url", ""),
-                "source":    "Remotive",
-                "posted_at": parse_date(item.get("publication_date")),
+                "title":       item.get("title", ""),
+                "company":     item.get("company_name", ""),
+                "location":    item.get("candidate_required_location", "Remote"),
+                "url":         item.get("url", ""),
+                "source":      "Remotive",
+                "posted_at":   parse_date(item.get("publication_date")),
+                "description": strip_html(item.get("description", "")),
             })
         log.info(f"  Remotive   '{query}': {len(jobs)} results")
         return jobs
@@ -433,8 +447,9 @@ SOURCES = [fetch_indeed, fetch_linkedin, fetch_himalayas, fetch_remotive,
 # ---------------------------------------------------------------------------
 
 def passes_filters(job: dict, filters: dict) -> tuple[bool, str]:
-    title    = job.get("title", "").lower()
-    location = job.get("location", "").lower()
+    title       = job.get("title", "").lower()
+    location    = job.get("location", "").lower()
+    description = job.get("description", "").lower()
 
     # Title must contain at least one include keyword
     must_include = [k.lower() for k in filters.get("title_must_include", [])]
@@ -445,6 +460,12 @@ def passes_filters(job: dict, filters: dict) -> tuple[bool, str]:
     for kw in [k.lower() for k in filters.get("title_must_exclude", [])]:
         if kw in title:
             return False, f"title '{job['title']}' blocked by '{kw}'"
+
+    # Description must include at least one AI keyword (only when description is available)
+    desc_must_include = [k.lower() for k in filters.get("description_must_include", [])]
+    if desc_must_include and description:
+        if not any(kw in description for kw in desc_must_include):
+            return False, f"description for '{job['title']}' missing AI keywords"
 
     # Location must match allowed list (empty location gets benefit of the doubt)
     allowed = [loc.lower() for loc in filters.get("location_allow", [])]
