@@ -665,7 +665,7 @@ function filterStatus(status) {
             "<th>Posted</th><th>Status</th><th>Source</th></tr>"
         )
         for r in campaign_rows:
-            _, title, company, location, url, source, found_at, posted_at, status = r
+            _, title, company, location, url, source, found_at, posted_at, status, *_ = r
             posted_str  = posted_at[:10] if posted_at else ""
             color       = STATUS_COLORS.get(status, "#3498db")
             html.append(
