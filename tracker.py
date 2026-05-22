@@ -438,8 +438,9 @@ def fetch_remotive(query: str) -> list[dict]:
         return []
 
 
-SOURCES = [fetch_indeed, fetch_linkedin, fetch_himalayas, fetch_remotive,
+SOURCES = [fetch_indeed, fetch_himalayas, fetch_remotive,
            fetch_remoteok, fetch_arbeitnow, fetch_weworkremotely]
+# fetch_linkedin paused
 
 
 # ---------------------------------------------------------------------------
