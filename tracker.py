@@ -171,7 +171,11 @@ def score_job_with_llm(title: str, company: str, description: str = "") -> tuple
             max_tokens=100,
             messages=[{"role": "user", "content": prompt}],
         )
-        content   = message.content[0].text.strip()
+        content = message.content[0].text.strip()
+        # Strip markdown code fences if present
+        if content.startswith("```"):
+            content = re.sub(r"^```[a-z]*\n?", "", content)
+            content = re.sub(r"\n?```$", "", content).strip()
         result    = json.loads(content)
         score     = max(1, min(5, int(result["score"])))
         rationale = str(result.get("rationale", ""))[:300]
