@@ -114,7 +114,8 @@ def init_db():
             posted_at         TEXT,
             status            TEXT DEFAULT 'New',
             status_updated_at TEXT,
-            score             INTEGER DEFAULT 0
+            score             INTEGER DEFAULT 0,
+            rationale         TEXT
         )
     """)
     conn.commit()
@@ -136,47 +137,65 @@ def is_new(conn, jid: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Relevance Scoring (based on Corey's resume profile)
+# Relevance Scoring — LLM-based via OpenAI
 # ---------------------------------------------------------------------------
 
-CAMPAIGN_SCORE_KEYWORDS: dict[str, dict[str, int]] = {
-    "Technical Recruiter & Talent Acquisition": {
-        "genai": 3, "generative ai": 3, "llm": 2, "ai": 2, "ml": 2,
-        "machine learning": 2, "artificial intelligence": 2,
-        "technical": 1, "senior": 1, "lead": 1, "head of": 2,
-        "director": 1, "startup": 1, "saas": 1, "embedded": 2,
-        "full cycle": 1, "full-cycle": 1, "deep tech": 2, "series": 1,
-    },
-    "AI Operations": {
-        "llmops": 3, "llm": 3, "genai": 3, "generative ai": 3,
-        "agentic": 3, "ai agent": 3, "ai agents": 3,
-        "prompt engineer": 3, "ai ops": 3, "aiops": 3,
-        "ai operations": 3, "ai platform": 2, "ai infrastructure": 2,
-        "senior": 1, "lead": 1, "head": 2,
-    },
-}
+def score_job_with_llm(title: str, company: str, description: str = "") -> tuple[int, str]:
+    """Score a job 1-5 using GPT-4o-mini based on Corey's recruiter background."""
+    try:
+        from openai import OpenAI
+        client = OpenAI()  # reads OPENAI_API_KEY from environment
+
+        desc_snippet = description[:1500] if description else "Not available"
+        prompt = (
+            "You are evaluating job fit for a senior technical recruiter.\n"
+            "Background: 10+ years recruiting experience, founding recruiter at multiple startups, "
+            "strong focus on AI/ML and technical hiring, full-cycle recruiting, "
+            "talent acquisition leadership, experience at high-growth Series A-C companies.\n\n"
+            f"Job details:\n"
+            f"- Title: {title}\n"
+            f"- Company: {company}\n"
+            f"- Description: {desc_snippet}\n\n"
+            "Rate this job's fit on a scale of 1-5:\n"
+            "1 = Poor fit (wrong field or wildly mismatched)\n"
+            "2 = Weak fit (some overlap but significant gaps)\n"
+            "3 = Moderate fit (relevant but not ideal)\n"
+            "4 = Good fit (strong match for background)\n"
+            "5 = Excellent fit (perfect match)\n\n"
+            'Respond ONLY with a JSON object, no other text:\n'
+            '{"score": <integer 1-5>, "rationale": "<one sentence, max 20 words>"}'
+        )
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=100,
+            temperature=0.1,
+        )
+        content = response.choices[0].message.content.strip()
+        result  = json.loads(content)
+        score   = max(1, min(5, int(result["score"])))
+        rationale = str(result.get("rationale", ""))[:300]
+        return score, rationale
+
+    except Exception as exc:
+        log.debug(f"LLM scoring failed for '{title}': {exc}")
+        return 3, "LLM unavailable"
 
 
-def score_job(title: str, company: str, campaign: str) -> int:
-    text = f"{title} {company}".lower()
-    keywords = CAMPAIGN_SCORE_KEYWORDS.get(campaign, {})
-    total = sum(w for kw, w in keywords.items() if kw in text)
-    return min(5, max(1, total))
-
-
-def save_job(conn, jid, campaign, title, company, location, url, source, posted_at=None):
-    job_score = score_job(title, company, campaign)
+def save_job(conn, jid, campaign, title, company, location, url, source,
+             posted_at=None, score=3, rationale=""):
     cur = conn.cursor()
     cur.execute(
         """INSERT INTO seen_jobs
            (id, campaign, title, company, location, url, source,
-            found_at, posted_at, status, status_updated_at, score)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            found_at, posted_at, status, status_updated_at, score, rationale)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
            ON CONFLICT (id) DO NOTHING""",
         (jid, campaign, title, company, location, url, source,
          datetime.now(timezone.utc).isoformat(),
          posted_at.isoformat() if posted_at else None,
-         "New", None, job_score),
+         "New", None, score, rationale),
     )
     conn.commit()
     cur.close()
@@ -827,11 +846,17 @@ def run():
         for job in candidates:
             jid = job_fingerprint(job["title"], job.get("company", ""), job["url"])
             if is_new(conn, jid):
+                score, rationale = score_job_with_llm(
+                    job["title"],
+                    job.get("company", ""),
+                    job.get("description", ""),
+                )
                 save_job(
                     conn, jid, campaign_name,
                     job["title"], job.get("company", ""),
                     job.get("location", ""), job["url"], job["source"],
                     job.get("posted_at"),
+                    score=score, rationale=rationale,
                 )
                 new_jobs.append(job)
 

@@ -54,7 +54,7 @@ def get_jobs():
     cur.execute(
         "SELECT id, campaign, title, company, location, url, source, "
         "posted_at, COALESCE(status,'New') as status, status_updated_at, "
-        "COALESCE(score,0) as score "
+        "COALESCE(score,0) as score, COALESCE(rationale,'') as rationale "
         "FROM seen_jobs "
         "WHERE COALESCE(status,'New') != 'Not a Fit' "
         "ORDER BY score DESC, found_at DESC"
@@ -266,6 +266,8 @@ function renderTable() {
     const score  = j.score || 1;
 
     // Score dots (filled up to score, grey after)
+    const rationale = j.rationale || "";
+    const tooltipText = rationale ? `${score}/5 — ${rationale}` : `Match score: ${score}/5`;
     const dots = Array.from({length:5}, (_,i) =>
       `<span class="score-dot" style="background:${i < score ? SCORE_COLORS[score-1] : '#e0e0e0'}"></span>`
     ).join("");
@@ -279,7 +281,7 @@ function renderTable() {
       <span class="status-dot" style="background:#c0392b"></span>&#10005; Not a Fit / Remove</div>`;
 
     return `<tr id="row-${j.id}">
-      <td><span class="score-badge" title="Match score: ${score}/5">${dots}</span></td>
+      <td><span class="score-badge" title="${tooltipText}" style="cursor:help">${dots}</span></td>
       <td><a href="${j.url}" target="_blank">${j.title}</a></td>
       <td>${j.company}</td>
       <td>${j.location}</td>
