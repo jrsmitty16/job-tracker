@@ -141,10 +141,10 @@ def is_new(conn, jid: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def score_job_with_llm(title: str, company: str, description: str = "") -> tuple[int, str]:
-    """Score a job 1-5 using GPT-4o-mini based on Corey's recruiter background."""
+    """Score a job 1-5 using Claude Haiku based on Corey's recruiter background."""
     try:
-        from openai import OpenAI
-        client = OpenAI()  # reads OPENAI_API_KEY from environment
+        import anthropic
+        client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from environment
 
         desc_snippet = description[:1500] if description else "Not available"
         prompt = (
@@ -166,15 +166,14 @@ def score_job_with_llm(title: str, company: str, description: str = "") -> tuple
             '{"score": <integer 1-5>, "rationale": "<one sentence, max 20 words>"}'
         )
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
+        message = client.messages.create(
+            model="claude-haiku-4-5",
             max_tokens=100,
-            temperature=0.1,
+            messages=[{"role": "user", "content": prompt}],
         )
-        content = response.choices[0].message.content.strip()
-        result  = json.loads(content)
-        score   = max(1, min(5, int(result["score"])))
+        content   = message.content[0].text.strip()
+        result    = json.loads(content)
+        score     = max(1, min(5, int(result["score"])))
         rationale = str(result.get("rationale", ""))[:300]
         return score, rationale
 
