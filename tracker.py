@@ -629,6 +629,49 @@ def run_campaign(campaign_name: str, queries: list[str], filters: dict) -> list[
 # Notifications
 # ---------------------------------------------------------------------------
 
+def generate_email_digest(all_jobs: list[dict], total: int) -> str | None:
+    """Generate a conversational AI narrative digest of new job matches via Claude."""
+    try:
+        import anthropic
+        client = anthropic.Anthropic()
+
+        job_lines = []
+        for j in sorted(all_jobs, key=lambda x: x.get("score", 0), reverse=True)[:15]:
+            job_lines.append(
+                f"- {j['title']} at {j.get('company', 'Unknown')} "
+                f"(match score: {j.get('score', '?')}/5, "
+                f"why: {j.get('rationale', 'N/A')}, "
+                f"best resume: {j.get('best_resume', 'N/A')}, "
+                f"resume note: {j.get('resume_rationale', 'N/A')})"
+            )
+
+        prompt = (
+            "You are writing a brief, conversational email digest for Corey Weil, a senior technical recruiter.\n\n"
+            "Corey's background: 10+ years recruiting experience, previously at Trilogy Education "
+            "(acquired for $750M), Presidents Club winner, targeting founding recruiter and senior "
+            "technical recruiter roles at Series A/B startups. Also exploring AI Operations roles.\n\n"
+            f"New job matches ({total} total):\n" + "\n".join(job_lines) + "\n\n"
+            "Write a short, conversational email digest (3-5 sentences) that:\n"
+            "1. Opens with a one-line summary (e.g. '8 new matches came in since your last check')\n"
+            "2. Calls out the 1-2 strongest matches by name with a specific reason why they stand out\n"
+            "3. Mentions the recommended resume for the top match\n"
+            "4. Closes with a brief note if anything looks weak or worth skipping\n\n"
+            "Be direct and conversational. Write flowing prose — no bullet points. "
+            "No placeholder text or generic filler."
+        )
+
+        message = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return message.content[0].text.strip()
+
+    except Exception as exc:
+        log.debug(f"Email digest generation failed: {exc}")
+        return None
+
+
 def send_email(config: dict, jobs_by_campaign: dict[str, list[dict]], last_email_at: datetime | None):
     cfg = config.get("email", {})
     if not cfg.get("enabled"):
@@ -654,16 +697,37 @@ def send_email(config: dict, jobs_by_campaign: dict[str, list[dict]], last_email
         log.info("No jobs newer than last email — skipping send")
         return False
 
-    now_str = datetime.now().strftime("%a %b %d %H:%M")
+    # Flatten all jobs for digest generation
+    all_jobs_flat = [j for jobs in jobs_by_campaign.values() for j in jobs]
+
+    # Find top company for subject line
+    top_job = max(all_jobs_flat, key=lambda x: x.get("score", 0), default=None)
+    top_company = top_job.get("company", "") if top_job else ""
+    subject = (
+        f"[Job Tracker] {total} new match{'es' if total != 1 else ''} — {top_company} looks strong"
+        if top_company else f"[Job Tracker] {total} new job match{'es' if total != 1 else ''}"
+    )
+
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"[Job Tracker] {total} new job(s) — {now_str}"
+    msg["Subject"] = subject
     msg["From"]    = cfg["username"]
     msg["To"]      = cfg.get("to", cfg["username"])
+
+    # Generate AI narrative
+    narrative = generate_email_digest(all_jobs_flat, total)
 
     html = ["<html><body style='font-family:Arial,sans-serif;max-width:800px;margin:auto'>"]
     html.append(f"<h1 style='color:#2c3e50'>Job Tracker &mdash; {total} New Posting(s)</h1>")
     if last_email_at:
         html.append(f"<p style='color:#666'>Jobs posted since last email: {last_email_at.strftime('%b %d at %H:%M')}</p>")
+
+    # Add AI narrative block
+    if narrative:
+        html.append(
+            "<div style='background:#f0f7ff;border-left:4px solid #2980b9;padding:16px 20px;"
+            "margin:16px 0;border-radius:4px;font-size:15px;line-height:1.6;color:#2c3e50'>"
+            f"{narrative}</div>"
+        )
 
     for campaign, jobs in jobs_by_campaign.items():
         if not jobs:
@@ -962,6 +1026,12 @@ def run():
                 best_resume=best_resume, resume_score=resume_score,
                 resume_rationale=resume_rationale,
             )
+            # Enrich job dict so email digest has full context
+            job["score"]            = score
+            job["rationale"]        = rationale
+            job["best_resume"]      = best_resume
+            job["resume_score"]     = resume_score
+            job["resume_rationale"] = resume_rationale
             new_jobs.append(job)
 
         new_jobs_by_campaign[campaign_name] = new_jobs
