@@ -118,8 +118,13 @@ def init_db():
             rationale         TEXT,
             best_resume       TEXT,
             resume_score      INTEGER,
-            resume_rationale  TEXT
+            resume_rationale  TEXT,
+            nudge             TEXT
         )
+    """)
+    # Safe migration: add nudge column if this table was created before this version
+    cur.execute("""
+        ALTER TABLE seen_jobs ADD COLUMN IF NOT EXISTS nudge TEXT
     """)
     conn.commit()
     cur.close()
@@ -969,6 +974,123 @@ def send_weekly_digest(config: dict, conn, since: datetime):
 
 
 # ---------------------------------------------------------------------------
+# Stale-job nudge system
+# ---------------------------------------------------------------------------
+
+def check_stale_jobs(conn) -> int:
+    """
+    Find jobs that have been sitting in a status too long and write an
+    AI-generated (or rule-based fallback) nudge into the nudge column.
+
+    Thresholds:
+      New / Researching  -> 3 days
+      Applied            -> 14 days
+      Interviewing       -> 7 days
+
+    Nudges are only written when nudge IS NULL so we don't overwrite an
+    existing one.  They are cleared automatically when the user changes
+    the status via the dashboard.
+    """
+    now = datetime.now(timezone.utc)
+    cutoffs = {
+        "New":          now - timedelta(days=3),
+        "Researching":  now - timedelta(days=3),
+        "Applied":      now - timedelta(days=14),
+        "Interviewing": now - timedelta(days=7),
+    }
+    rule_nudges = {
+        "New":          "Still sitting here — research the company and decide: apply or skip.",
+        "Researching":  "Time to apply or move on; you've been researching for 3+ days.",
+        "Applied":      "Two weeks with no reply — send a polite follow-up to the recruiter.",
+        "Interviewing": "No update in a week — send a thank-you or check-in note today.",
+    }
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, title, company,
+               COALESCE(status, 'New') AS status,
+               status_updated_at, found_at
+        FROM   seen_jobs
+        WHERE  COALESCE(status, 'New') NOT IN ('Not a Fit', 'Rejected/Passed', 'Offer')
+          AND  (nudge IS NULL OR nudge = '')
+          AND  (
+            (COALESCE(status, 'New') = 'New'
+             AND CAST(COALESCE(NULLIF(status_updated_at, ''), found_at) AS TIMESTAMPTZ) < %s)
+            OR
+            (COALESCE(status, 'New') = 'Researching'
+             AND status_updated_at IS NOT NULL AND status_updated_at <> ''
+             AND CAST(status_updated_at AS TIMESTAMPTZ) < %s)
+            OR
+            (COALESCE(status, 'New') = 'Applied'
+             AND status_updated_at IS NOT NULL AND status_updated_at <> ''
+             AND CAST(status_updated_at AS TIMESTAMPTZ) < %s)
+            OR
+            (COALESCE(status, 'New') = 'Interviewing'
+             AND status_updated_at IS NOT NULL AND status_updated_at <> ''
+             AND CAST(status_updated_at AS TIMESTAMPTZ) < %s)
+          )
+        """,
+        (cutoffs["New"], cutoffs["Researching"], cutoffs["Applied"], cutoffs["Interviewing"]),
+    )
+    stale = cur.fetchall()
+    cur.close()
+
+    if not stale:
+        log.info("  -> 0 stale jobs to nudge")
+        return 0
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic()
+        use_llm = True
+    except Exception:
+        client = None
+        use_llm = False
+
+    updated = 0
+    for (job_id, title, company, status, status_updated_at, found_at) in stale:
+        since = parse_date(status_updated_at) or parse_date(found_at)
+        days_in = int((now - since).days) if since else 0
+
+        nudge_text = rule_nudges.get(status, "Take action or archive this job.")
+
+        if use_llm and client:
+            try:
+                prompt = (
+                    f"A job seeker has '{status}' status for {days_in} days:\n"
+                    f"- Title: {title}\n"
+                    f"- Company: {company}\n\n"
+                    "Write one short, actionable nudge telling them exactly what to do next. "
+                    "Be direct and specific. Under 20 words.\n"
+                    'Respond ONLY with JSON: {"nudge": "<text>"}'
+                )
+                msg = client.messages.create(
+                    model="claude-haiku-4-5",
+                    max_tokens=80,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                content = msg.content[0].text.strip()
+                if content.startswith("```"):
+                    content = re.sub(r"^```[a-z]*\n?", "", content)
+                    content = re.sub(r"\n?```$", "", content).strip()
+                result = json.loads(content)
+                nudge_text = str(result.get("nudge", nudge_text))[:200]
+            except Exception as exc:
+                log.debug(f"Nudge LLM failed for '{title}': {exc}")
+
+        cur2 = conn.cursor()
+        cur2.execute("UPDATE seen_jobs SET nudge = %s WHERE id = %s", (nudge_text, job_id))
+        conn.commit()
+        cur2.close()
+        updated += 1
+        log.debug(f"  Nudged '{title}' ({status}, {days_in}d): {nudge_text}")
+
+    log.info(f"  -> {updated} stale job(s) nudged")
+    return updated
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1066,6 +1188,10 @@ def run():
         if sent:
             state["last_digest_at"] = datetime.now(timezone.utc).isoformat()
             save_state(state)
+
+    # Nudge stale jobs — runs every cycle, only writes when nudge is NULL
+    log.info("Checking for stale jobs...")
+    check_stale_jobs(conn)
 
     write_html_report(conn)
     conn.close()

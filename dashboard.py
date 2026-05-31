@@ -57,7 +57,8 @@ def get_jobs():
         "COALESCE(score,0) as score, COALESCE(rationale,'') as rationale, "
         "COALESCE(best_resume,'') as best_resume, "
         "COALESCE(resume_score,0) as resume_score, "
-        "COALESCE(resume_rationale,'') as resume_rationale "
+        "COALESCE(resume_rationale,'') as resume_rationale, "
+        "COALESCE(nudge,'') as nudge "
         "FROM seen_jobs "
         "WHERE COALESCE(status,'New') != 'Not a Fit' "
         "ORDER BY score DESC, found_at DESC"
@@ -146,6 +147,28 @@ a:hover { text-decoration: underline; }
 .toast.show { opacity: 1; }
 
 .count-label { font-size: 13px; color: #666; margin-left: auto; }
+
+/* Nudge panel */
+.nudge-panel { background: #fff8e1; border: 1px solid #f0c040;
+               border-radius: 10px; padding: 16px 20px; margin-bottom: 24px; }
+.nudge-panel-hdr { display: flex; align-items: center; gap: 8px;
+                   margin-bottom: 12px; }
+.nudge-panel-hdr h3 { font-size: 14px; font-weight: 700; color: #9a6700;
+                      flex: 1; }
+.nudge-panel-hdr .collapse-btn { font-size: 12px; color: #9a6700; cursor: pointer;
+                                  background: none; border: none; padding: 2px 8px;
+                                  border-radius: 4px; }
+.nudge-panel-hdr .collapse-btn:hover { background: #f0e0a0; }
+.nudge-item { display: flex; align-items: flex-start; gap: 10px;
+              padding: 8px 0; border-bottom: 1px solid #f0e0a0; }
+.nudge-item:last-child { border-bottom: none; padding-bottom: 0; }
+.nudge-meta { flex: 1; min-width: 0; }
+.nudge-title-line { font-size: 13px; font-weight: 600; white-space: nowrap;
+                    overflow: hidden; text-overflow: ellipsis; }
+.nudge-title-line a { color: #2980b9; text-decoration: none; }
+.nudge-title-line a:hover { text-decoration: underline; }
+.nudge-text { font-size: 12px; color: #666; margin-top: 2px; }
+.nudge-warn { font-size: 15px; flex-shrink: 0; margin-top: 1px; }
 </style>
 </head>
 <body>
@@ -159,6 +182,9 @@ a:hover { text-decoration: underline; }
 
   <!-- Pipeline -->
   <div class="pipeline" id="pipeline-boxes"></div>
+
+  <!-- Nudges -->
+  <div id="nudge-panel"></div>
 
   <!-- Controls -->
   <div class="controls">
@@ -218,7 +244,49 @@ async function loadData() {
 
   renderPipeline(data.pipeline);
   renderCampaignTabs();
+  renderNudges();
   renderTable();
+}
+
+// ---- Nudge panel ----
+let nudgePanelCollapsed = false;
+function renderNudges() {
+  const nudgedJobs = allJobs.filter(j => j.nudge && j.nudge.trim());
+  const panel = document.getElementById("nudge-panel");
+  if (!nudgedJobs.length) { panel.innerHTML = ""; return; }
+
+  const bodyId = "nudge-body";
+  const chevron = nudgePanelCollapsed ? "▶" : "▼";
+  const bodyDisplay = nudgePanelCollapsed ? "none" : "block";
+
+  panel.innerHTML = `
+    <div class="nudge-panel">
+      <div class="nudge-panel-hdr">
+        <h3>⚠️ Action Needed &nbsp;<span style="font-weight:400;font-size:12px">(${nudgedJobs.length} job${nudgedJobs.length>1?'s':''})</span></h3>
+        <button class="collapse-btn" onclick="toggleNudgePanel()">${chevron} ${nudgePanelCollapsed?'Show':'Hide'}</button>
+      </div>
+      <div id="${bodyId}" style="display:${bodyDisplay}">
+        ${nudgedJobs.map(j => {
+          const sc = STATUS_COLORS[j.status] || "#3498db";
+          return `<div class="nudge-item">
+            <span class="nudge-warn">⚠️</span>
+            <div class="nudge-meta">
+              <div class="nudge-title-line">
+                <a href="${j.url}" target="_blank">${j.title}</a>
+                &nbsp;at&nbsp;${j.company}
+                &nbsp;<span class="badge" style="background:${sc};font-size:11px;padding:2px 8px;vertical-align:middle">${j.status}</span>
+              </div>
+              <div class="nudge-text">${j.nudge}</div>
+            </div>
+          </div>`;
+        }).join("")}
+      </div>
+    </div>`;
+}
+
+function toggleNudgePanel() {
+  nudgePanelCollapsed = !nudgePanelCollapsed;
+  renderNudges();
 }
 
 // ---- Pipeline ----
@@ -294,6 +362,12 @@ function renderTable() {
          </span>`
       : `<span style="color:#bbb">—</span>`;
 
+    // Nudge icon (⚠️ with tooltip when nudge exists)
+    const nudgeIcon = j.nudge
+      ? `<span title="${j.nudge.replace(/"/g,'&quot;').replace(/'/g,'&#39;')}"
+               style="margin-left:5px;cursor:help;font-size:13px;vertical-align:middle">⚠️</span>`
+      : "";
+
     // Status options
     const opts = STATUS_ORDER.map(s =>
       `<div class="status-opt" onclick="setStatus('${j.id}','${s}',event)">
@@ -315,7 +389,7 @@ function renderTable() {
           <span class="badge" id="badge-${j.id}" style="background:${color}"
             onclick="toggleMenu('${j.id}',event)">${j.status}</span>
           <div class="status-menu" id="menu-${j.id}">${opts}</div>
-        </div>
+        </div>${nudgeIcon}
       </td>
       <td style="color:#999;font-size:12px">${j.source}</td>
     </tr>`;
@@ -383,7 +457,7 @@ async function setStatus(id, newStatus, e) {
     showToast("Job removed from dashboard", "#c0392b");
   } else {
     const job = allJobs.find(j => j.id === id);
-    if (job) job.status = newStatus;
+    if (job) { job.status = newStatus; job.nudge = ""; }
     showToast(`Updated: ${newStatus}`);
   }
 
@@ -391,6 +465,7 @@ async function setStatus(id, newStatus, e) {
   const pipeline = {};
   allJobs.forEach(j => { pipeline[j.status] = (pipeline[j.status]||0)+1; });
   renderPipeline(pipeline);
+  renderNudges();
   renderTable();
 }
 
@@ -435,7 +510,7 @@ def api_update_status():
         conn = get_conn()
         cur  = conn.cursor()
         cur.execute(
-            "UPDATE seen_jobs SET status=%s, status_updated_at=%s WHERE id=%s",
+            "UPDATE seen_jobs SET status=%s, status_updated_at=%s, nudge=NULL WHERE id=%s",
             (status, datetime.now(timezone.utc).isoformat(), job_id),
         )
         conn.commit()
