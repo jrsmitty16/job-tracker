@@ -253,6 +253,39 @@ a:hover { text-decoration: underline; }
                 text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
 .drawer-value { font-size: 13px; color: #444; line-height: 1.5; }
 .drawer-empty { font-size: 13px; color: #aaa; font-style: italic; }
+
+/* Cover letter modal */
+.cl-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55);
+            z-index:1000; align-items:center; justify-content:center; }
+.cl-modal.open { display:flex; }
+.cl-modal-box { background:#fff; border-radius:12px; width:680px; max-width:94vw;
+                max-height:88vh; display:flex; flex-direction:column;
+                box-shadow:0 8px 40px rgba(0,0,0,.25); }
+.cl-modal-hdr { padding:18px 24px 14px; border-bottom:1px solid #eee;
+                display:flex; align-items:center; justify-content:space-between; }
+.cl-modal-hdr h3 { font-size:16px; font-weight:700; color:#2c3e50; }
+.cl-close { background:none; border:none; font-size:20px; cursor:pointer;
+            color:#aaa; line-height:1; padding:2px 6px; border-radius:4px; }
+.cl-close:hover { background:#f5f5f5; color:#555; }
+.cl-modal-body { flex:1; overflow-y:auto; padding:20px 24px; }
+.cl-spinner { text-align:center; padding:60px 0; color:#aaa; font-size:14px; }
+.cl-text { font-size:14px; line-height:1.8; white-space:pre-wrap; color:#333; }
+.cl-modal-footer { padding:14px 24px; border-top:1px solid #eee;
+                   display:flex; gap:10px; justify-content:flex-end; }
+.cl-btn { padding:8px 16px; border-radius:6px; border:none; cursor:pointer;
+          font-size:13px; font-weight:600; transition:opacity .15s; }
+.cl-btn:hover { opacity:.85; }
+.cl-btn-copy     { background:#2980b9; color:#fff; }
+.cl-btn-download { background:#27ae60; color:#fff; }
+.cl-btn-regen    { background:#f0f2f5; color:#555; }
+.cl-btn-sm { background:none; border:1px solid #ddd; border-radius:4px; color:#666;
+             font-size:11px; padding:2px 7px; cursor:pointer; margin-top:4px;
+             white-space:nowrap; transition:all .15s; display:inline-block; }
+.cl-btn-sm:hover { background:#f0f2f5; border-color:#bbb; color:#333; }
+.kanban-card-footer { margin-top:6px; padding-top:6px; border-top:1px solid #f0f2f5; }
+.cl-card-link { background:none; border:none; color:#2980b9; font-size:11px;
+                cursor:pointer; padding:0; text-decoration:underline; }
+.cl-card-link:hover { color:#1a5276; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
@@ -390,6 +423,25 @@ a:hover { text-decoration: underline; }
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- Cover Letter Modal -->
+<div class="cl-modal" id="cl-modal" onclick="if(event.target===this)closeCLModal()">
+  <div class="cl-modal-box">
+    <div class="cl-modal-hdr">
+      <h3 id="cl-modal-title">Cover Letter</h3>
+      <button class="cl-close" onclick="closeCLModal()">✕</button>
+    </div>
+    <div class="cl-modal-body">
+      <div class="cl-spinner" id="cl-spinner">Generating cover letter…</div>
+      <div class="cl-text" id="cl-text" style="display:none"></div>
+    </div>
+    <div class="cl-modal-footer" id="cl-modal-footer" style="display:none">
+      <button class="cl-btn cl-btn-regen"    onclick="regenerateCoverLetter()">↺ Regenerate</button>
+      <button class="cl-btn cl-btn-download" onclick="downloadCoverLetter()">⬇ Download</button>
+      <button class="cl-btn cl-btn-copy"     onclick="copyCoverLetter()">📋 Copy</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const STATUS_COLORS = {
@@ -578,6 +630,7 @@ function renderTable() {
             onclick="toggleMenu('${j.id}',event)">${j.status}</span>
           <div class="status-menu" id="menu-${j.id}">${opts}</div>
         </div>${nudgeIcon}
+        <div><button class="cl-btn-sm" onclick="generateCoverLetter('${j.id}',event)">✉ Cover Letter</button></div>
       </td>
       <td style="color:#999;font-size:12px">${j.source}</td>
     </tr>
@@ -856,6 +909,9 @@ function buildCard(j) {
       <span class="kanban-source">${j.source || ""}</span>
       ${resumePart}${nudgePart}${infoHtml}
     </div>
+    <div class="kanban-card-footer">
+      <button class="cl-card-link" onclick="generateCoverLetter('${j.id}',event)">✉ cover letter</button>
+    </div>
   </div>`;
 }
 
@@ -1028,6 +1084,80 @@ function renderCompaniesChart(data) {
   });
 }
 
+// ---- Cover Letter ----
+let clJobId   = null;
+let clCompany = "";
+let clTitle   = "";
+
+async function generateCoverLetter(jobId, e) {
+  if (e) e.stopPropagation();
+  const job = allJobs.find(j => j.id === jobId);
+  clJobId   = jobId;
+  clCompany = job ? (job.company || "") : "";
+  clTitle   = job ? (job.title   || "") : "";
+
+  document.getElementById("cl-modal-title").textContent =
+    "Cover Letter" + (clTitle ? " — " + clTitle : "");
+  document.getElementById("cl-spinner").style.display      = "block";
+  document.getElementById("cl-text").style.display         = "none";
+  document.getElementById("cl-modal-footer").style.display = "none";
+  document.getElementById("cl-modal").classList.add("open");
+  document.body.style.overflow = "hidden";
+
+  await fetchCoverLetter();
+}
+
+async function fetchCoverLetter() {
+  document.getElementById("cl-spinner").style.display      = "block";
+  document.getElementById("cl-text").style.display         = "none";
+  document.getElementById("cl-modal-footer").style.display = "none";
+  try {
+    const res  = await fetch("/api/generate-cover-letter", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ job_id: clJobId }),
+    });
+    const data = await res.json();
+    document.getElementById("cl-spinner").style.display = "none";
+    if (data.error) {
+      document.getElementById("cl-text").textContent   = "Error: " + data.error;
+      document.getElementById("cl-text").style.display = "block";
+    } else {
+      document.getElementById("cl-text").textContent      = data.cover_letter;
+      document.getElementById("cl-text").style.display    = "block";
+      document.getElementById("cl-modal-footer").style.display = "flex";
+    }
+  } catch(err) {
+    document.getElementById("cl-spinner").style.display = "none";
+    document.getElementById("cl-text").textContent      = "Network error. Please try again.";
+    document.getElementById("cl-text").style.display    = "block";
+  }
+}
+
+function closeCLModal() {
+  document.getElementById("cl-modal").classList.remove("open");
+  document.body.style.overflow = "";
+}
+
+function copyCoverLetter() {
+  const text = document.getElementById("cl-text").textContent;
+  navigator.clipboard.writeText(text).then(() => showToast("Copied to clipboard"));
+}
+
+function downloadCoverLetter() {
+  const text = document.getElementById("cl-text").textContent;
+  const safe = (clCompany + "_" + clTitle)
+    .replace(/[^a-z0-9_\\-]/gi, "_").slice(0, 60);
+  const blob = new Blob([text], { type: "text/plain" });
+  const a    = document.createElement("a");
+  a.href     = URL.createObjectURL(blob);
+  a.download = "cover_letter_" + safe + ".txt";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function regenerateCoverLetter() { fetchCoverLetter(); }
+
 // ---- Init ----
 // Apply stored view preference immediately (before data arrives)
 (function applyStoredView() {
@@ -1042,6 +1172,7 @@ function renderCompaniesChart(data) {
 })();
 loadData();
 setInterval(loadData, 60000);  // auto-refresh every minute
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeCLModal(); });
 </script>
 </body>
 </html>
@@ -1159,6 +1290,99 @@ def api_jobs():
 @app.route("/api/analytics")
 def api_analytics():
     return jsonify(get_analytics())
+
+
+@app.route("/api/generate-cover-letter", methods=["POST"])
+def api_generate_cover_letter():
+    import anthropic as _anthropic
+    import os, yaml
+
+    data   = request.get_json()
+    job_id = data.get("job_id")
+    if not job_id:
+        return jsonify({"error": "job_id required"}), 400
+
+    conn = get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        "SELECT title, company, best_resume, resume_rationale, "
+        "company_summary, recent_news, funding_stage "
+        "FROM seen_jobs WHERE id = %s",
+        (job_id,)
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.close(); conn.close()
+        return jsonify({"error": "Job not found"}), 404
+
+    title, company, best_resume, resume_rationale, \
+        company_summary, recent_news, funding_stage = row
+
+    # Fetch resume content
+    resume_content = ""
+    if best_resume:
+        cur.execute("SELECT content FROM resumes WHERE name = %s", (best_resume,))
+        r = cur.fetchone()
+        if r:
+            resume_content = r[0] or ""
+    cur.close(); conn.close()
+
+    # Build company context block
+    company_ctx = []
+    if company_summary: company_ctx.append(f"About: {company_summary}")
+    if funding_stage:   company_ctx.append(f"Stage: {funding_stage}")
+    if recent_news:     company_ctx.append(f"Recent news: {recent_news}")
+    company_section = "\n".join(company_ctx) if company_ctx else "No additional company context available."
+    resume_section  = resume_content if resume_content else "No resume content available."
+
+    prompt = f"""You are writing a cover letter for Corey Weil, a senior technical recruiter and talent acquisition professional with extensive experience in full-cycle recruiting, employer branding, and AI/automation tooling.
+
+Job Details:
+- Title: {title}
+- Company: {company}
+
+Company Context:
+{company_section}
+
+Resume Content:
+{resume_section}
+
+Write a compelling, human-sounding cover letter for this role. Requirements:
+- 3 paragraphs, under 250 words total
+- No em dashes (use commas or restructure instead)
+- Do NOT open with "I am excited to apply" or any generic opener like "I am writing to express my interest"
+- Sound like a real person, not a template
+- Highlight specific relevant experience from the resume that matches this role
+- Reference something specific about the company when context is available
+- Close with a confident but not pushy call to action
+- No salutation line, no "Dear Hiring Manager", no signature block — just the 3 paragraphs
+
+Output only the cover letter text, nothing else."""
+
+    # Resolve API key
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        try:
+            cfg_path = Path(__file__).parent / "config.yaml"
+            cfg = yaml.safe_load(open(cfg_path))
+            api_key = cfg.get("anthropic_api_key", "")
+        except Exception:
+            pass
+
+    if not api_key:
+        return jsonify({"error": "Anthropic API key not configured. Set ANTHROPIC_API_KEY env var."}), 500
+
+    try:
+        client = _anthropic.Anthropic(api_key=api_key)
+        msg    = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=700,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        cover_letter = msg.content[0].text.strip()
+        return jsonify({"cover_letter": cover_letter})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
 
 
 VALID_STATUSES = STATUS_ORDER + ["Researching", "Not a Fit"]
