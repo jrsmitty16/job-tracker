@@ -186,13 +186,58 @@ a:hover { text-decoration: underline; }
 .analytics-spinner { text-align: center; padding: 80px 0; color: #aaa; font-size: 15px; }
 .tab.analytics-tab { background: #8e44ad; color: #fff; border-color: #8e44ad; }
 .tab.analytics-tab:hover { background: #7d3c98; border-color: #7d3c98; }
+
+/* View toggle (Table / Board) */
+.view-toggle { display: flex; border-radius: 6px; overflow: hidden;
+               border: 1px solid rgba(255,255,255,.35); }
+.view-btn { background: transparent; color: rgba(255,255,255,.65); border: none;
+            padding: 6px 14px; cursor: pointer; font-size: 13px; font-weight: 500;
+            transition: all .15s; white-space: nowrap; }
+.view-btn:hover { background: rgba(255,255,255,.12); color: #fff; }
+.view-btn.active { background: rgba(255,255,255,.22); color: #fff; }
+
+/* Kanban board */
+.kanban-board { display: flex; gap: 16px; overflow-x: auto; padding-bottom: 16px;
+                align-items: flex-start; }
+.kanban-col { flex: 0 0 270px; background: #e8eaed; border-radius: 10px;
+              padding: 12px; }
+.kanban-col-hdr { display: flex; align-items: center; justify-content: space-between;
+                  margin-bottom: 10px; padding: 0 2px; }
+.kanban-col-title { font-size: 13px; font-weight: 700; }
+.kanban-col-count { font-size: 11px; background: rgba(0,0,0,.13); color: #555;
+                    border-radius: 10px; padding: 2px 8px; font-weight: 600; min-width: 22px;
+                    text-align: center; }
+.kanban-cards { min-height: 60px; display: flex; flex-direction: column; gap: 8px; }
+.kanban-card { background: #fff; border-radius: 8px; padding: 11px 12px;
+               box-shadow: 0 1px 3px rgba(0,0,0,.1); cursor: grab; user-select: none;
+               transition: box-shadow .15s; }
+.kanban-card:hover { box-shadow: 0 3px 10px rgba(0,0,0,.16); }
+.kanban-card.sortable-chosen { box-shadow: 0 6px 20px rgba(0,0,0,.2); cursor: grabbing; }
+.kanban-card.sortable-ghost { opacity: .38; background: #d0d4d9; }
+.kanban-card-title { font-size: 13px; font-weight: 600; margin-bottom: 2px;
+                     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kanban-card-title a { color: #2c3e50; text-decoration: none; }
+.kanban-card-title a:hover { color: #2980b9; text-decoration: underline; }
+.kanban-card-company { font-size: 11px; color: #888; margin-bottom: 8px;
+                       white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kanban-card-meta { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.kanban-source { font-size: 10px; background: #f0f2f5; color: #999; border-radius: 4px;
+                 padding: 2px 5px; white-space: nowrap; }
+.kanban-resume { font-size: 10px; color: #8e44ad; white-space: nowrap;
+                 overflow: hidden; text-overflow: ellipsis; max-width: 100px; }
+.kanban-nudge { font-size: 12px; cursor: help; line-height: 1; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
 </head>
 <body>
 
 <div class="topbar">
   <h1>Job Tracker Dashboard</h1>
+  <div class="view-toggle">
+    <button id="btn-table" class="view-btn active" onclick="setView('table')">☰ Table</button>
+    <button id="btn-board" class="view-btn"        onclick="setView('board')">⬛ Board</button>
+  </div>
   <span class="updated" id="updated-label"></span>
 </div>
 
@@ -258,6 +303,40 @@ a:hover { text-decoration: underline; }
     </div>
   </div>
 
+  <!-- Kanban Board -->
+  <div id="kanban-wrap" style="display:none">
+    <div class="kanban-board" id="kanban-board">
+      <div class="kanban-col" data-status="New">
+        <div class="kanban-col-hdr">
+          <span class="kanban-col-title" style="color:#3498db">New</span>
+          <span class="kanban-col-count" id="kcount-New">0</span>
+        </div>
+        <div class="kanban-cards" id="cards-New"></div>
+      </div>
+      <div class="kanban-col" data-status="Researching">
+        <div class="kanban-col-hdr">
+          <span class="kanban-col-title" style="color:#16a085">Researching</span>
+          <span class="kanban-col-count" id="kcount-Researching">0</span>
+        </div>
+        <div class="kanban-cards" id="cards-Researching"></div>
+      </div>
+      <div class="kanban-col" data-status="Applied">
+        <div class="kanban-col-hdr">
+          <span class="kanban-col-title" style="color:#e67e22">Applied</span>
+          <span class="kanban-col-count" id="kcount-Applied">0</span>
+        </div>
+        <div class="kanban-cards" id="cards-Applied"></div>
+      </div>
+      <div class="kanban-col" data-status="Interviewing">
+        <div class="kanban-col-hdr">
+          <span class="kanban-col-title" style="color:#27ae60">Interviewing</span>
+          <span class="kanban-col-count" id="kcount-Interviewing">0</span>
+        </div>
+        <div class="kanban-cards" id="cards-Interviewing"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Table -->
   <div id="job-table-wrap">
   <div class="card">
@@ -287,12 +366,14 @@ a:hover { text-decoration: underline; }
 <script>
 const STATUS_COLORS = {
   "New":             "#3498db",
+  "Researching":     "#16a085",
   "Applied":         "#e67e22",
   "Interviewing":    "#27ae60",
   "Offer":           "#f1c40f",
   "Rejected/Passed": "#95a5a6",
   "Not a Fit":       "#c0392b",
 };
+const BOARD_COLUMNS = ["New","Researching","Applied","Interviewing"];
 const STATUS_ORDER  = ["New","Applied","Interviewing","Offer","Rejected/Passed"];
 const SCORE_COLORS  = ["#bdc3c7","#e67e22","#f1c40f","#2ecc71","#27ae60"];
 
@@ -301,6 +382,8 @@ let activeStatus     = "all";
 let activeCampaign   = "all";
 let showingAnalytics = false;
 let analyticsCharts  = {};
+let currentView      = localStorage.getItem("jobTrackerView") || "table";
+let sortableInstances = [];
 
 // ---- Load data ----
 async function loadData() {
@@ -315,7 +398,8 @@ async function loadData() {
   renderPipeline(data.pipeline);
   renderCampaignTabs();
   renderNudges();
-  renderTable();
+  if (currentView === "board") renderBoard();
+  else                         renderTable();
 }
 
 // ---- Nudge panel ----
@@ -472,13 +556,25 @@ function renderTable() {
 function closeAnalytics() {
   showingAnalytics = false;
   document.getElementById("analytics-panel").style.display = "none";
-  document.getElementById("job-table-wrap").style.display  = "block";
-  document.getElementById("search").style.display          = "";
-  document.getElementById("count-label").style.display     = "";
+  if (currentView === "board") {
+    document.getElementById("kanban-wrap").style.display    = "block";
+    document.getElementById("job-table-wrap").style.display = "none";
+    document.getElementById("search").style.display         = "none";
+    document.getElementById("count-label").style.display    = "none";
+    renderBoard();
+  } else {
+    document.getElementById("job-table-wrap").style.display = "block";
+    document.getElementById("kanban-wrap").style.display    = "none";
+    document.getElementById("search").style.display         = "";
+    document.getElementById("count-label").style.display    = "";
+    renderTable();
+  }
 }
 
 function filterStatus(s) {
   if (showingAnalytics) { closeAnalytics(); renderCampaignTabs(); }
+  // Pipeline box clicks always land in table view
+  if (currentView === "board") setView("table");
   activeStatus = s;
   document.querySelectorAll(".pip").forEach(el => el.classList.remove("active"));
   event.currentTarget.classList.add("active");
@@ -489,7 +585,8 @@ function filterCampaign(c) {
   if (showingAnalytics) closeAnalytics();
   activeCampaign = c;
   renderCampaignTabs();
-  renderTable();
+  if (currentView === "board") renderBoard();
+  else                         renderTable();
 }
 
 function applyFilters() { renderTable(); }
@@ -560,10 +657,157 @@ function showToast(msg, color) {
   setTimeout(() => t.classList.remove("show"), 2500);
 }
 
+// ---- View switcher ----
+function setView(v) {
+  currentView = v;
+  localStorage.setItem("jobTrackerView", v);
+
+  const tableWrap = document.getElementById("job-table-wrap");
+  const boardWrap = document.getElementById("kanban-wrap");
+  const searchEl  = document.getElementById("search");
+  const countEl   = document.getElementById("count-label");
+  const btnTable  = document.getElementById("btn-table");
+  const btnBoard  = document.getElementById("btn-board");
+
+  if (v === "board") {
+    tableWrap.style.display = "none";
+    boardWrap.style.display = "block";
+    searchEl.style.display  = "none";
+    countEl.style.display   = "none";
+    btnTable.classList.remove("active");
+    btnBoard.classList.add("active");
+    renderBoard();
+  } else {
+    boardWrap.style.display = "none";
+    tableWrap.style.display = "block";
+    searchEl.style.display  = "";
+    countEl.style.display   = "";
+    btnBoard.classList.remove("active");
+    btnTable.classList.add("active");
+    renderTable();
+  }
+}
+
+// ---- Kanban board ----
+function renderBoard() {
+  // Tear down old Sortable instances before re-rendering
+  sortableInstances.forEach(s => { try { s.destroy(); } catch(_) {} });
+  sortableInstances = [];
+
+  // Apply campaign filter; show only BOARD_COLUMNS statuses
+  const jobs = allJobs.filter(j =>
+    (activeCampaign === "all" || j.campaign === activeCampaign) &&
+    BOARD_COLUMNS.includes(j.status)
+  );
+
+  // Group by status
+  const byStatus = {};
+  BOARD_COLUMNS.forEach(s => { byStatus[s] = []; });
+  jobs.forEach(j => { if (byStatus[j.status]) byStatus[j.status].push(j); });
+
+  // Populate each column
+  BOARD_COLUMNS.forEach(status => {
+    const cardsEl = document.getElementById("cards-" + status);
+    const countEl = document.getElementById("kcount-" + status);
+    const colJobs = byStatus[status];
+    countEl.textContent = colJobs.length;
+    cardsEl.innerHTML   = colJobs.map(buildCard).join("");
+
+    const inst = Sortable.create(cardsEl, {
+      group:       { name: "kanban", pull: true, put: true },
+      animation:   150,
+      ghostClass:  "sortable-ghost",
+      chosenClass: "sortable-chosen",
+      onEnd:       handleCardDrop,
+    });
+    sortableInstances.push(inst);
+  });
+}
+
+function buildCard(j) {
+  const score = j.score || 0;
+  const dots  = score > 0
+    ? Array.from({length:5}, (_,i) =>
+        `<span class="score-dot" style="background:${i<score?SCORE_COLORS[score-1]:'#e0e0e0'}"></span>`
+      ).join("")
+    : "";
+  const resumePart = j.best_resume
+    ? `<span class="kanban-resume" title="${j.best_resume}">📄 ${j.best_resume}</span>`
+    : "";
+  const nudgePart = j.nudge
+    ? `<span class="kanban-nudge" title="${j.nudge.replace(/"/g,"&quot;").replace(/'/g,"&#39;")}">⚠️</span>`
+    : "";
+  return `<div class="kanban-card" data-id="${j.id}" data-status="${j.status}">
+    <div class="kanban-card-title">
+      <a href="${j.url}" target="_blank" onclick="event.stopPropagation()">${j.title}</a>
+    </div>
+    <div class="kanban-card-company">${j.company || ""}</div>
+    <div class="kanban-card-meta">
+      <span class="score-badge">${dots}</span>
+      <span class="kanban-source">${j.source || ""}</span>
+      ${resumePart}${nudgePart}
+    </div>
+  </div>`;
+}
+
+async function handleCardDrop(evt) {
+  if (evt.from === evt.to) return;   // same column — nothing to do
+
+  const card      = evt.item;
+  const newStatus = evt.to.closest(".kanban-col").dataset.status;
+  const oldStatus = card.dataset.status;
+  const jobId     = card.dataset.id;
+
+  // Optimistic update
+  card.dataset.status = newStatus;
+  updateKanbanCounts();
+
+  try {
+    const res  = await fetch("/api/update_status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: jobId, status: newStatus }),
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error("Server rejected");
+
+    // Sync allJobs in memory
+    const job = allJobs.find(j => j.id === jobId);
+    if (job) { job.status = newStatus; job.nudge = ""; }
+
+    // Refresh pipeline summary and nudge panel
+    const pipeline = {};
+    allJobs.forEach(j => { pipeline[j.status] = (pipeline[j.status]||0)+1; });
+    renderPipeline(pipeline);
+    renderNudges();
+    showToast(`Moved to ${newStatus}`);
+
+  } catch(err) {
+    // Rollback — put card back where it came from
+    card.dataset.status = oldStatus;
+    const origCol = document.getElementById("cards-" + oldStatus);
+    if (origCol) {
+      const ref = origCol.children[evt.oldIndex] || null;
+      origCol.insertBefore(card, ref);
+    }
+    updateKanbanCounts();
+    showToast("Status update failed — card returned", "#e74c3c");
+  }
+}
+
+function updateKanbanCounts() {
+  BOARD_COLUMNS.forEach(status => {
+    const cardsEl = document.getElementById("cards-" + status);
+    const countEl = document.getElementById("kcount-" + status);
+    if (cardsEl && countEl) countEl.textContent = cardsEl.children.length;
+  });
+}
+
 // ---- Analytics ----
 async function openAnalyticsTab() {
   showingAnalytics = true;
   document.getElementById("job-table-wrap").style.display  = "none";
+  document.getElementById("kanban-wrap").style.display     = "none";
   document.getElementById("search").style.display          = "none";
   document.getElementById("count-label").style.display     = "none";
   document.getElementById("analytics-panel").style.display = "block";
@@ -676,6 +920,17 @@ function renderCompaniesChart(data) {
 }
 
 // ---- Init ----
+// Apply stored view preference immediately (before data arrives)
+(function applyStoredView() {
+  if (currentView === "board") {
+    document.getElementById("btn-table").classList.remove("active");
+    document.getElementById("btn-board").classList.add("active");
+    document.getElementById("job-table-wrap").style.display = "none";
+    document.getElementById("kanban-wrap").style.display    = "block";
+    document.getElementById("search").style.display         = "none";
+    document.getElementById("count-label").style.display    = "none";
+  }
+})();
 loadData();
 setInterval(loadData, 60000);  // auto-refresh every minute
 </script>
@@ -797,7 +1052,7 @@ def api_analytics():
     return jsonify(get_analytics())
 
 
-VALID_STATUSES = STATUS_ORDER + ["Not a Fit"]
+VALID_STATUSES = STATUS_ORDER + ["Researching", "Not a Fit"]
 
 @app.route("/api/update_status", methods=["POST"])
 def api_update_status():
