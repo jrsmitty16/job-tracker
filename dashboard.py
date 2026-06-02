@@ -169,7 +169,25 @@ a:hover { text-decoration: underline; }
 .nudge-title-line a:hover { text-decoration: underline; }
 .nudge-text { font-size: 12px; color: #666; margin-top: 2px; }
 .nudge-warn { font-size: 15px; flex-shrink: 0; margin-top: 1px; }
+
+/* Analytics */
+.stat-row { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+.stat-card { background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.08);
+             padding: 20px 28px; flex: 1; min-width: 160px; text-align: center; }
+.stat-num { font-size: 38px; font-weight: 700; color: #2c3e50; line-height: 1; }
+.stat-lbl { font-size: 11px; color: #999; margin-top: 6px; text-transform: uppercase;
+            letter-spacing: .5px; }
+.chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 900px) { .chart-grid { grid-template-columns: 1fr; } }
+.chart-card { background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.08);
+              padding: 20px 24px; }
+.chart-card h4 { font-size: 11px; font-weight: 700; color: #888; margin-bottom: 16px;
+                 text-transform: uppercase; letter-spacing: .6px; }
+.analytics-spinner { text-align: center; padding: 80px 0; color: #aaa; font-size: 15px; }
+.tab.analytics-tab { background: #8e44ad; color: #fff; border-color: #8e44ad; }
+.tab.analytics-tab:hover { background: #7d3c98; border-color: #7d3c98; }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
@@ -193,7 +211,55 @@ a:hover { text-decoration: underline; }
     <span class="count-label" id="count-label"></span>
   </div>
 
+  <!-- Analytics Panel -->
+  <div id="analytics-panel" style="display:none">
+    <div id="analytics-loading" class="analytics-spinner">Loading analytics…</div>
+    <div id="analytics-content" style="display:none">
+      <div class="stat-row">
+        <div class="stat-card">
+          <div class="stat-num" id="stat-total">—</div>
+          <div class="stat-lbl">Total Jobs Tracked</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num" id="stat-conversion">—</div>
+          <div class="stat-lbl">Conversion Rate</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num" id="stat-nudges">—</div>
+          <div class="stat-lbl">Active Nudges</div>
+        </div>
+      </div>
+      <div class="chart-grid">
+        <div class="chart-card" style="grid-column:1/-1">
+          <h4>Jobs Scraped Per Day — Last 30 Days</h4>
+          <canvas id="chart-timeline" height="80"></canvas>
+        </div>
+        <div class="chart-card">
+          <h4>Status Breakdown</h4>
+          <canvas id="chart-status"></canvas>
+        </div>
+        <div class="chart-card">
+          <h4>Jobs by Source</h4>
+          <canvas id="chart-sources"></canvas>
+        </div>
+        <div class="chart-card">
+          <h4>Relevance Score Distribution</h4>
+          <canvas id="chart-scores"></canvas>
+        </div>
+        <div class="chart-card">
+          <h4>Best Resume Recommendations</h4>
+          <canvas id="chart-resumes"></canvas>
+        </div>
+        <div class="chart-card" style="grid-column:1/-1">
+          <h4>Top Companies — Last 30 Days</h4>
+          <canvas id="chart-companies" height="60"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Table -->
+  <div id="job-table-wrap">
   <div class="card">
     <table>
       <thead>
@@ -211,6 +277,7 @@ a:hover { text-decoration: underline; }
       </thead>
       <tbody id="job-tbody"></tbody>
     </table>
+  </div>
   </div>
 
 </div>
@@ -230,11 +297,14 @@ const STATUS_ORDER  = ["New","Applied","Interviewing","Offer","Rejected/Passed"]
 const SCORE_COLORS  = ["#bdc3c7","#e67e22","#f1c40f","#2ecc71","#27ae60"];
 
 let allJobs = [];
-let activeStatus   = "all";
-let activeCampaign = "all";
+let activeStatus     = "all";
+let activeCampaign   = "all";
+let showingAnalytics = false;
+let analyticsCharts  = {};
 
 // ---- Load data ----
 async function loadData() {
+  if (showingAnalytics) return;   // don't clobber analytics view on auto-refresh
   const res  = await fetch("/api/jobs");
   const data = await res.json();
   allJobs = data.jobs;
@@ -313,9 +383,11 @@ function renderCampaignTabs() {
   const campaigns = ["all", ...new Set(allJobs.map(j => j.campaign))];
   const box = document.getElementById("campaign-tabs");
   box.innerHTML = campaigns.map(c =>
-    `<div class="tab ${activeCampaign===c?'active':''}" onclick="filterCampaign('${c}')">
+    `<div class="tab ${activeCampaign===c && !showingAnalytics?'active':''}" onclick="filterCampaign('${c}')">
       ${c === "all" ? "All Campaigns" : c}</div>`
-  ).join("");
+  ).join("") +
+  `<div class="tab${showingAnalytics?' analytics-tab':''}" onclick="openAnalyticsTab()" style="margin-left:12px">
+    📊 Analytics</div>`;
 }
 
 // ---- Table ----
@@ -397,7 +469,16 @@ function renderTable() {
 }
 
 // ---- Filters ----
+function closeAnalytics() {
+  showingAnalytics = false;
+  document.getElementById("analytics-panel").style.display = "none";
+  document.getElementById("job-table-wrap").style.display  = "block";
+  document.getElementById("search").style.display          = "";
+  document.getElementById("count-label").style.display     = "";
+}
+
 function filterStatus(s) {
+  if (showingAnalytics) { closeAnalytics(); renderCampaignTabs(); }
   activeStatus = s;
   document.querySelectorAll(".pip").forEach(el => el.classList.remove("active"));
   event.currentTarget.classList.add("active");
@@ -405,6 +486,7 @@ function filterStatus(s) {
 }
 
 function filterCampaign(c) {
+  if (showingAnalytics) closeAnalytics();
   activeCampaign = c;
   renderCampaignTabs();
   renderTable();
@@ -478,6 +560,121 @@ function showToast(msg, color) {
   setTimeout(() => t.classList.remove("show"), 2500);
 }
 
+// ---- Analytics ----
+async function openAnalyticsTab() {
+  showingAnalytics = true;
+  document.getElementById("job-table-wrap").style.display  = "none";
+  document.getElementById("search").style.display          = "none";
+  document.getElementById("count-label").style.display     = "none";
+  document.getElementById("analytics-panel").style.display = "block";
+  renderCampaignTabs();
+  await loadAnalytics();
+}
+
+async function loadAnalytics() {
+  document.getElementById("analytics-loading").style.display = "block";
+  document.getElementById("analytics-content").style.display = "none";
+  try {
+    const res  = await fetch("/api/analytics");
+    const data = await res.json();
+    document.getElementById("analytics-loading").style.display = "none";
+    document.getElementById("analytics-content").style.display = "block";
+    document.getElementById("stat-total").textContent      = data.total_jobs.toLocaleString();
+    document.getElementById("stat-conversion").textContent = data.conversion_rate + "%";
+    document.getElementById("stat-nudges").textContent     = data.nudges_active;
+    renderTimelineChart(data.jobs_over_time);
+    renderStatusChart(data.status_breakdown);
+    renderScoreChart(data.score_distribution);
+    renderSourceChart(data.source_breakdown);
+    renderResumeChart(data.resume_breakdown);
+    renderCompaniesChart(data.top_companies);
+  } catch(err) {
+    document.getElementById("analytics-loading").innerHTML =
+      '<span style="color:#e74c3c">Failed to load analytics. Try refreshing.</span>';
+    console.error("Analytics error:", err);
+  }
+}
+
+function destroyChart(key) {
+  if (analyticsCharts[key]) { analyticsCharts[key].destroy(); delete analyticsCharts[key]; }
+}
+
+function renderTimelineChart(data) {
+  destroyChart("timeline");
+  const labels = Object.keys(data).sort();
+  analyticsCharts.timeline = new Chart(document.getElementById("chart-timeline"), {
+    type: "line",
+    data: { labels, datasets: [{ label: "Jobs", data: labels.map(k => data[k]),
+      borderColor: "#2980b9", backgroundColor: "rgba(41,128,185,.12)",
+      fill: true, tension: .35, pointRadius: 3, pointHoverRadius: 5 }] },
+    options: { responsive: true, plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
+  });
+}
+
+function renderStatusChart(data) {
+  destroyChart("status");
+  const order  = ["New","Applied","Interviewing","Offer","Rejected/Passed"];
+  const labels = order.filter(k => data[k] !== undefined);
+  analyticsCharts.status = new Chart(document.getElementById("chart-status"), {
+    type: "doughnut",
+    data: { labels, datasets: [{ data: labels.map(k => data[k]),
+      backgroundColor: labels.map(k => STATUS_COLORS[k] || "#aaa"), borderWidth: 2 }] },
+    options: { responsive: true, plugins: { legend: { position: "right" } } }
+  });
+}
+
+function renderScoreChart(data) {
+  destroyChart("scores");
+  const labels = ["1","2","3","4","5"];
+  analyticsCharts.scores = new Chart(document.getElementById("chart-scores"), {
+    type: "bar",
+    data: { labels: labels.map(l => l + (l==="1" ? " dot" : " dots")),
+      datasets: [{ data: labels.map(k => data[k] || 0),
+        backgroundColor: SCORE_COLORS, borderRadius: 4 }] },
+    options: { responsive: true, plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
+  });
+}
+
+function renderSourceChart(data) {
+  destroyChart("sources");
+  const labels  = Object.keys(data);
+  const palette = ["#3498db","#e67e22","#2ecc71","#9b59b6","#1abc9c","#e74c3c","#f39c12","#34495e"];
+  analyticsCharts.sources = new Chart(document.getElementById("chart-sources"), {
+    type: "doughnut",
+    data: { labels, datasets: [{ data: labels.map(k => data[k]),
+      backgroundColor: palette.slice(0, labels.length), borderWidth: 2 }] },
+    options: { responsive: true, plugins: { legend: { position: "right" } } }
+  });
+}
+
+function renderResumeChart(data) {
+  destroyChart("resumes");
+  const labels = Object.keys(data);
+  analyticsCharts.resumes = new Chart(document.getElementById("chart-resumes"), {
+    type: "bar",
+    data: { labels, datasets: [{ data: labels.map(k => data[k]),
+      backgroundColor: "#8e44ad", borderRadius: 4 }] },
+    options: { responsive: true, indexAxis: "y",
+      plugins: { legend: { display: false } },
+      scales: { x: { beginAtZero: true, ticks: { precision: 0 } } } }
+  });
+}
+
+function renderCompaniesChart(data) {
+  destroyChart("companies");
+  analyticsCharts.companies = new Chart(document.getElementById("chart-companies"), {
+    type: "bar",
+    data: { labels: data.map(d => d.company),
+      datasets: [{ data: data.map(d => d.count),
+        backgroundColor: "#27ae60", borderRadius: 4 }] },
+    options: { responsive: true, indexAxis: "y",
+      plugins: { legend: { display: false } },
+      scales: { x: { beginAtZero: true, ticks: { precision: 0 } } } }
+  });
+}
+
 // ---- Init ----
 loadData();
 setInterval(loadData, 60000);  // auto-refresh every minute
@@ -492,11 +689,112 @@ def index():
     return DASHBOARD_HTML
 
 
+def get_analytics():
+    conn = get_conn()
+    cur  = conn.cursor()
+
+    # Jobs per day — last 30 days
+    cur.execute("""
+        SELECT DATE(CAST(found_at AS TIMESTAMPTZ)) AS day, COUNT(*) AS cnt
+        FROM   seen_jobs
+        WHERE  CAST(found_at AS TIMESTAMPTZ) >= NOW() - INTERVAL '30 days'
+        GROUP  BY day ORDER BY day
+    """)
+    jobs_over_time = {str(r[0]): r[1] for r in cur.fetchall()}
+
+    # Status breakdown (exclude dismissed)
+    cur.execute("""
+        SELECT COALESCE(status,'New'), COUNT(*)
+        FROM   seen_jobs
+        WHERE  COALESCE(status,'New') != 'Not a Fit'
+        GROUP  BY COALESCE(status,'New')
+    """)
+    status_breakdown = {r[0]: r[1] for r in cur.fetchall()}
+
+    # Score distribution 1-5
+    cur.execute("""
+        SELECT COALESCE(score,0)::text, COUNT(*)
+        FROM   seen_jobs
+        WHERE  COALESCE(status,'New') != 'Not a Fit'
+        GROUP  BY COALESCE(score,0)
+        ORDER  BY COALESCE(score,0)
+    """)
+    score_distribution = {r[0]: r[1] for r in cur.fetchall()}
+
+    # Source breakdown
+    cur.execute("""
+        SELECT COALESCE(source,'Unknown'), COUNT(*)
+        FROM   seen_jobs
+        WHERE  COALESCE(status,'New') != 'Not a Fit'
+        GROUP  BY COALESCE(source,'Unknown')
+        ORDER  BY COUNT(*) DESC
+    """)
+    source_breakdown = {r[0]: r[1] for r in cur.fetchall()}
+
+    # Resume recommendations
+    cur.execute("""
+        SELECT COALESCE(NULLIF(best_resume,''),'Unmatched'), COUNT(*)
+        FROM   seen_jobs
+        WHERE  COALESCE(status,'New') != 'Not a Fit'
+        GROUP  BY COALESCE(NULLIF(best_resume,''),'Unmatched')
+        ORDER  BY COUNT(*) DESC
+    """)
+    resume_breakdown = {r[0]: r[1] for r in cur.fetchall()}
+
+    # Totals for conversion rate
+    cur.execute("SELECT COUNT(*) FROM seen_jobs WHERE COALESCE(status,'New') != 'Not a Fit'")
+    total_jobs = cur.fetchone()[0] or 0
+
+    cur.execute("SELECT COUNT(*) FROM seen_jobs WHERE status IN ('Applied','Interviewing','Offer')")
+    converted = cur.fetchone()[0] or 0
+
+    conversion_rate = round(converted / total_jobs * 100, 1) if total_jobs else 0.0
+
+    # Top 10 companies last 30 days
+    cur.execute("""
+        SELECT company, COUNT(*) AS cnt
+        FROM   seen_jobs
+        WHERE  CAST(found_at AS TIMESTAMPTZ) >= NOW() - INTERVAL '30 days'
+          AND  COALESCE(status,'New') != 'Not a Fit'
+          AND  company IS NOT NULL AND company <> ''
+        GROUP  BY company
+        ORDER  BY cnt DESC
+        LIMIT  10
+    """)
+    top_companies = [{"company": r[0], "count": r[1]} for r in cur.fetchall()]
+
+    # Active nudges
+    cur.execute("""
+        SELECT COUNT(*) FROM seen_jobs
+        WHERE  nudge IS NOT NULL AND nudge <> ''
+          AND  COALESCE(status,'New') != 'Not a Fit'
+    """)
+    nudges_active = cur.fetchone()[0] or 0
+
+    cur.close(); conn.close()
+    return {
+        "jobs_over_time":    jobs_over_time,
+        "status_breakdown":  status_breakdown,
+        "score_distribution": score_distribution,
+        "source_breakdown":  source_breakdown,
+        "resume_breakdown":  resume_breakdown,
+        "conversion_rate":   conversion_rate,
+        "top_companies":     top_companies,
+        "total_jobs":        total_jobs,
+        "nudges_active":     nudges_active,
+    }
+
+
 @app.route("/api/jobs")
 def api_jobs():
     jobs     = get_jobs()
     pipeline = get_pipeline()
     return jsonify({"jobs": jobs, "pipeline": pipeline})
+
+
+@app.route("/api/analytics")
+def api_analytics():
+    return jsonify(get_analytics())
 
 
 VALID_STATUSES = STATUS_ORDER + ["Not a Fit"]
