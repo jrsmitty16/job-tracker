@@ -119,13 +119,22 @@ def init_db():
             best_resume       TEXT,
             resume_score      INTEGER,
             resume_rationale  TEXT,
-            nudge             TEXT
+            nudge             TEXT,
+            funding_stage     TEXT,
+            headcount         TEXT,
+            recent_news       TEXT,
+            company_summary   TEXT
         )
     """)
-    # Safe migration: add nudge column if this table was created before this version
-    cur.execute("""
-        ALTER TABLE seen_jobs ADD COLUMN IF NOT EXISTS nudge TEXT
-    """)
+    # Safe migration: add columns introduced after the initial schema
+    for _ddl in [
+        "ALTER TABLE seen_jobs ADD COLUMN IF NOT EXISTS nudge TEXT",
+        "ALTER TABLE seen_jobs ADD COLUMN IF NOT EXISTS funding_stage TEXT",
+        "ALTER TABLE seen_jobs ADD COLUMN IF NOT EXISTS headcount TEXT",
+        "ALTER TABLE seen_jobs ADD COLUMN IF NOT EXISTS recent_news TEXT",
+        "ALTER TABLE seen_jobs ADD COLUMN IF NOT EXISTS company_summary TEXT",
+    ]:
+        cur.execute(_ddl)
     conn.commit()
     cur.close()
     return conn
@@ -254,22 +263,130 @@ def match_resume_to_job(conn, title: str, company: str, description: str = "") -
         return None, 0, ""
 
 
+# ---------------------------------------------------------------------------
+# Company Research Enrichment — Tavily + Claude Haiku
+# ---------------------------------------------------------------------------
+
+def enrich_company(company_name: str, job_title: str) -> tuple:
+    """
+    Research a company via Tavily search and extract structured intel
+    using Claude Haiku.  Returns (funding_stage, headcount, recent_news,
+    company_summary) — all strings or None on any failure.
+    """
+    import os
+
+    if not company_name or not company_name.strip():
+        return None, None, None, None
+
+    # Resolve Tavily key — env var first, then config.yaml
+    tavily_key = os.environ.get("TAVILY_API_KEY")
+    if not tavily_key:
+        try:
+            cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+            tavily_key = cfg.get("tavily_api_key")
+        except Exception:
+            pass
+
+    if not tavily_key:
+        log.debug(f"  Enrichment skipped for '{company_name}': TAVILY_API_KEY not set")
+        return None, None, None, None
+
+    # ---- Step 1: Tavily search ----
+    try:
+        query = (
+            f"{company_name} funding stage headcount employees "
+            f"recent news {datetime.now().year}"
+        )
+        resp = requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key":        tavily_key,
+                "query":          query,
+                "search_depth":   "basic",
+                "max_results":    5,
+                "include_answer": False,
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        snippets = [
+            r.get("content", "").strip()[:500]
+            for r in resp.json().get("results", [])[:5]
+            if r.get("content")
+        ]
+        if not snippets:
+            return None, None, None, None
+        raw_text = "\n\n".join(snippets)
+    except Exception as exc:
+        log.debug(f"  Tavily search failed for '{company_name}': {exc}")
+        return None, None, None, None
+
+    # ---- Step 2: Claude Haiku extraction ----
+    try:
+        import anthropic
+        client = anthropic.Anthropic()
+
+        prompt = (
+            f"Based on these search results about '{company_name}', extract "
+            "structured company intel. Return ONLY a JSON object with exactly "
+            "these four keys (use null for any field you cannot determine):\n\n"
+            "{\n"
+            '  "funding_stage": "e.g. Series B, Public, Bootstrapped, Seed",\n'
+            '  "headcount": "e.g. 50-100 employees",\n'
+            '  "recent_news": "one sentence on the most relevant recent development",\n'
+            '  "company_summary": "two sentences max describing what the company does"\n'
+            "}\n\n"
+            f"SEARCH RESULTS:\n{raw_text[:3000]}"
+        )
+        message = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        content = message.content[0].text.strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```[a-z]*\n?", "", content)
+            content = re.sub(r"\n?```$", "", content).strip()
+
+        result = json.loads(content)
+
+        def _clean(v, maxlen):
+            s = str(v).strip() if v else ""
+            return s[:maxlen] if s and s.lower() != "null" else None
+
+        funding_stage   = _clean(result.get("funding_stage"),   100)
+        headcount       = _clean(result.get("headcount"),       100)
+        recent_news     = _clean(result.get("recent_news"),     500)
+        company_summary = _clean(result.get("company_summary"), 500)
+
+        log.info(f"  Enriched: {company_name} — {funding_stage}, {headcount}")
+        return funding_stage, headcount, recent_news, company_summary
+
+    except Exception as exc:
+        log.debug(f"  Enrichment extraction failed for '{company_name}': {exc}")
+        return None, None, None, None
+
+
 def save_job(conn, jid, campaign, title, company, location, url, source,
              posted_at=None, score=3, rationale="",
-             best_resume=None, resume_score=None, resume_rationale=None):
+             best_resume=None, resume_score=None, resume_rationale=None,
+             funding_stage=None, headcount=None,
+             recent_news=None, company_summary=None):
     cur = conn.cursor()
     cur.execute(
         """INSERT INTO seen_jobs
            (id, campaign, title, company, location, url, source,
             found_at, posted_at, status, status_updated_at, score, rationale,
-            best_resume, resume_score, resume_rationale)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            best_resume, resume_score, resume_rationale,
+            funding_stage, headcount, recent_news, company_summary)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
            ON CONFLICT (id) DO NOTHING""",
         (jid, campaign, title, company, location, url, source,
          datetime.now(timezone.utc).isoformat(),
          posted_at.isoformat() if posted_at else None,
          "New", None, score, rationale,
-         best_resume, resume_score, resume_rationale),
+         best_resume, resume_score, resume_rationale,
+         funding_stage, headcount, recent_news, company_summary),
     )
     conn.commit()
     cur.close()
@@ -1139,6 +1256,10 @@ def run():
                 job.get("company", ""),
                 job.get("description", ""),
             )
+            funding_stage, headcount, recent_news, company_summary = enrich_company(
+                job.get("company", ""),
+                job["title"],
+            )
             save_job(
                 conn, jid, campaign_name,
                 job["title"], job.get("company", ""),
@@ -1147,6 +1268,8 @@ def run():
                 score=score, rationale=rationale,
                 best_resume=best_resume, resume_score=resume_score,
                 resume_rationale=resume_rationale,
+                funding_stage=funding_stage, headcount=headcount,
+                recent_news=recent_news, company_summary=company_summary,
             )
             # Enrich job dict so email digest has full context
             job["score"]            = score

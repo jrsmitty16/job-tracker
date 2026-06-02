@@ -58,7 +58,11 @@ def get_jobs():
         "COALESCE(best_resume,'') as best_resume, "
         "COALESCE(resume_score,0) as resume_score, "
         "COALESCE(resume_rationale,'') as resume_rationale, "
-        "COALESCE(nudge,'') as nudge "
+        "COALESCE(nudge,'') as nudge, "
+        "COALESCE(funding_stage,'') as funding_stage, "
+        "COALESCE(headcount,'') as headcount, "
+        "COALESCE(recent_news,'') as recent_news, "
+        "COALESCE(company_summary,'') as company_summary "
         "FROM seen_jobs "
         "WHERE COALESCE(status,'New') != 'Not a Fit' "
         "ORDER BY score DESC, found_at DESC"
@@ -226,6 +230,29 @@ a:hover { text-decoration: underline; }
 .kanban-resume { font-size: 10px; color: #8e44ad; white-space: nowrap;
                  overflow: hidden; text-overflow: ellipsis; max-width: 100px; }
 .kanban-nudge { font-size: 12px; cursor: help; line-height: 1; }
+.kanban-info { font-size: 12px; cursor: help; line-height: 1; }
+.kanban-card-funding { font-size: 10px; color: #aaa; margin-bottom: 6px;
+                       white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Company research drawer */
+.expand-btn { background: none; border: none; cursor: pointer; color: #bbb;
+              font-size: 11px; padding: 3px 5px; border-radius: 4px;
+              transition: all .15s; line-height: 1; }
+.expand-btn:hover { background: #eef2f7; color: #555; }
+.expand-btn.open { color: #2980b9; }
+.drawer-td { padding: 0 !important; border-bottom: 1px solid #e8eaed !important; }
+.job-drawer { max-height: 0; overflow: hidden;
+              transition: max-height .25s ease, padding .25s ease;
+              padding: 0 20px; background: #f8fbff;
+              border-top: 1px solid transparent; }
+.job-drawer.open { max-height: 220px; padding: 14px 20px;
+                   border-top-color: #e8eaed; }
+.drawer-grid { display: flex; gap: 28px; flex-wrap: wrap; }
+.drawer-section { flex: 1; min-width: 180px; max-width: 400px; }
+.drawer-label { font-size: 10px; font-weight: 700; color: #aaa;
+                text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
+.drawer-value { font-size: 13px; color: #444; line-height: 1.5; }
+.drawer-empty { font-size: 13px; color: #aaa; font-style: italic; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
@@ -343,6 +370,7 @@ a:hover { text-decoration: underline; }
     <table>
       <thead>
         <tr>
+          <th style="width:32px"></th>
           <th>Match</th>
           <th>Title</th>
           <th>Company</th>
@@ -533,6 +561,10 @@ function renderTable() {
       <span class="status-dot" style="background:#c0392b"></span>&#10005; Not a Fit / Remove</div>`;
 
     return `<tr id="row-${j.id}">
+      <td style="width:32px;padding:0 6px;text-align:center">
+        <button class="expand-btn" id="expand-${j.id}"
+          onclick="toggleDrawer('${j.id}',event)" title="Company research">▶</button>
+      </td>
       <td><span class="score-badge" title="${tooltipText}" style="cursor:help">${dots}</span></td>
       <td><a href="${j.url}" target="_blank">${j.title}</a></td>
       <td>${j.company}</td>
@@ -548,8 +580,70 @@ function renderTable() {
         </div>${nudgeIcon}
       </td>
       <td style="color:#999;font-size:12px">${j.source}</td>
+    </tr>
+    <tr id="drawer-row-${j.id}" style="display:none">
+      <td colspan="10" class="drawer-td">
+        <div class="job-drawer" id="drawer-${j.id}">${buildDrawerContent(j)}</div>
+      </td>
     </tr>`;
   }).join("");
+  openDrawerId = null;  // reset on every re-render
+}
+
+function buildDrawerContent(j) {
+  const hasData = j.company_summary || j.funding_stage || j.headcount || j.recent_news;
+  if (!hasData) return '<div class="drawer-empty">No company data available</div>';
+  const sections = [];
+  if (j.company_summary)
+    sections.push(`<div class="drawer-section">
+      <div class="drawer-label">About</div>
+      <div class="drawer-value">${j.company_summary}</div></div>`);
+  const meta = [j.funding_stage, j.headcount].filter(Boolean).join(" &middot; ");
+  if (meta)
+    sections.push(`<div class="drawer-section">
+      <div class="drawer-label">Stage &amp; Size</div>
+      <div class="drawer-value">${meta}</div></div>`);
+  if (j.recent_news)
+    sections.push(`<div class="drawer-section">
+      <div class="drawer-label">📰 Recent News</div>
+      <div class="drawer-value">${j.recent_news}</div></div>`);
+  return `<div class="drawer-grid">${sections.join("")}</div>`;
+}
+
+let openDrawerId = null;
+function toggleDrawer(id, e) {
+  e.stopPropagation();
+  const drawerRow = document.getElementById("drawer-row-" + id);
+  const drawerDiv = document.getElementById("drawer-" + id);
+  const btn       = document.getElementById("expand-" + id);
+  if (!drawerRow) return;
+
+  // Close the previously open drawer first
+  if (openDrawerId && openDrawerId !== id) {
+    const pDiv = document.getElementById("drawer-" + openDrawerId);
+    const pBtn = document.getElementById("expand-" + openDrawerId);
+    const pId  = openDrawerId;
+    if (pDiv) pDiv.classList.remove("open");
+    if (pBtn) { pBtn.textContent = "▶"; pBtn.classList.remove("open"); }
+    setTimeout(() => {
+      const pRow = document.getElementById("drawer-row-" + pId);
+      if (pRow) pRow.style.display = "none";
+    }, 260);
+    openDrawerId = null;
+  }
+
+  const isOpen = drawerDiv.classList.contains("open");
+  if (isOpen) {
+    drawerDiv.classList.remove("open");
+    btn.textContent = "▶"; btn.classList.remove("open");
+    setTimeout(() => { drawerRow.style.display = "none"; }, 260);
+    openDrawerId = null;
+  } else {
+    drawerRow.style.display = "table-row";
+    requestAnimationFrame(() => drawerDiv.classList.add("open"));
+    btn.textContent = "▼"; btn.classList.add("open");
+    openDrawerId = id;
+  }
 }
 
 // ---- Filters ----
@@ -737,15 +831,30 @@ function buildCard(j) {
   const nudgePart = j.nudge
     ? `<span class="kanban-nudge" title="${j.nudge.replace(/"/g,"&quot;").replace(/'/g,"&#39;")}">⚠️</span>`
     : "";
+
+  // Funding + headcount line
+  const fundingLine = [j.funding_stage, j.headcount].filter(Boolean).join(" · ");
+  const fundingHtml = fundingLine
+    ? `<div class="kanban-card-funding">${fundingLine}</div>` : "";
+
+  // ℹ️ tooltip with company summary + recent news
+  const infoLines = [];
+  if (j.company_summary) infoLines.push(j.company_summary);
+  if (j.recent_news)     infoLines.push("📰 " + j.recent_news);
+  const infoHtml = infoLines.length
+    ? `<span class="kanban-info" title="${infoLines.join(" | ").replace(/"/g,"&quot;").replace(/'/g,"&#39;")}">ℹ️</span>`
+    : "";
+
   return `<div class="kanban-card" data-id="${j.id}" data-status="${j.status}">
     <div class="kanban-card-title">
       <a href="${j.url}" target="_blank" onclick="event.stopPropagation()">${j.title}</a>
     </div>
     <div class="kanban-card-company">${j.company || ""}</div>
+    ${fundingHtml}
     <div class="kanban-card-meta">
       <span class="score-badge">${dots}</span>
       <span class="kanban-source">${j.source || ""}</span>
-      ${resumePart}${nudgePart}
+      ${resumePart}${nudgePart}${infoHtml}
     </div>
   </div>`;
 }
