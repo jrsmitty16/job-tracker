@@ -204,8 +204,9 @@ a:hover { text-decoration: underline; }
 #kanban-wrap { overflow-x: auto; }
 .kanban-board { display: flex; gap: 12px; padding-bottom: 16px;
                 align-items: flex-start; min-width: max-content; }
-.kanban-col { flex: 0 0 240px; background: #e8eaed; border-radius: 10px;
-              padding: 12px; }
+.kanban-col { flex: 0 0 240px; width: 240px; max-width: 240px;
+              min-width: 240px; overflow: hidden;
+              background: #e8eaed; border-radius: 10px; padding: 12px; }
 .kanban-col-hdr { display: flex; align-items: center; justify-content: space-between;
                   margin-bottom: 10px; padding: 0 2px; }
 .kanban-col-title { font-size: 13px; font-weight: 700; }
@@ -215,7 +216,8 @@ a:hover { text-decoration: underline; }
 .kanban-cards { min-height: 60px; display: flex; flex-direction: column; gap: 8px; }
 .kanban-card { background: #fff; border-radius: 8px; padding: 11px 12px;
                box-shadow: 0 1px 3px rgba(0,0,0,.1); cursor: grab; user-select: none;
-               transition: box-shadow .15s; }
+               transition: box-shadow .15s; min-width: 0; max-width: 100%;
+               overflow: hidden; }
 .kanban-card:hover { box-shadow: 0 3px 10px rgba(0,0,0,.16); }
 .kanban-card.sortable-chosen { box-shadow: 0 6px 20px rgba(0,0,0,.2); cursor: grabbing; }
 .kanban-card.sortable-ghost { opacity: .38; background: #d0d4d9; }
