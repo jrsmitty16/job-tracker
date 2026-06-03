@@ -407,7 +407,6 @@ a:hover { text-decoration: underline; }
       <thead>
         <tr>
           <th style="width:32px"></th>
-          <th>Match</th>
           <th>Title</th>
           <th>Company</th>
           <th>Location</th>
@@ -620,7 +619,6 @@ function renderTable() {
         <button class="expand-btn" id="expand-${j.id}"
           onclick="toggleDrawer('${j.id}',event)" title="Company research">▶</button>
       </td>
-      <td><span class="score-badge" title="${tooltipText}" style="cursor:help">${dots}</span></td>
       <td><a href="${j.url}" target="_blank">${j.title}</a></td>
       <td>${j.company}</td>
       <td>${j.location}</td>
@@ -638,7 +636,7 @@ function renderTable() {
       <td style="color:#999;font-size:12px">${j.source}</td>
     </tr>
     <tr id="drawer-row-${j.id}" style="display:none">
-      <td colspan="10" class="drawer-td">
+      <td colspan="9" class="drawer-td">
         <div class="job-drawer" id="drawer-${j.id}">${buildDrawerContent(j)}</div>
       </td>
     </tr>`;
