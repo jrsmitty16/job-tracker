@@ -201,9 +201,10 @@ a:hover { text-decoration: underline; }
 .view-btn.active { background: rgba(255,255,255,.22); color: #fff; }
 
 /* Kanban board */
-.kanban-board { display: flex; gap: 16px; overflow-x: auto; padding-bottom: 16px;
-                align-items: flex-start; }
-.kanban-col { flex: 0 0 270px; background: #e8eaed; border-radius: 10px;
+#kanban-wrap { overflow-x: auto; }
+.kanban-board { display: flex; gap: 12px; padding-bottom: 16px;
+                align-items: flex-start; min-width: max-content; }
+.kanban-col { flex: 0 0 240px; background: #e8eaed; border-radius: 10px;
               padding: 12px; }
 .kanban-col-hdr { display: flex; align-items: center; justify-content: space-between;
                   margin-bottom: 10px; padding: 0 2px; }
