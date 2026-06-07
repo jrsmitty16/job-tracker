@@ -299,8 +299,8 @@ def enrich_company(company_name: str, job_title: str) -> tuple:
         )
         resp = requests.post(
             "https://api.tavily.com/search",
+            headers={"Authorization": f"Bearer {tavily_key}"},
             json={
-                "api_key":        tavily_key,
                 "query":          query,
                 "search_depth":   "basic",
                 "max_results":    5,
@@ -318,13 +318,21 @@ def enrich_company(company_name: str, job_title: str) -> tuple:
             return None, None, None, None
         raw_text = "\n\n".join(snippets)
     except Exception as exc:
-        log.debug(f"  Tavily search failed for '{company_name}': {exc}")
+        log.warning(f"  Tavily search failed for '{company_name}': {exc}")
         return None, None, None, None
 
     # ---- Step 2: Claude Haiku extraction ----
     try:
-        import anthropic
-        client = anthropic.Anthropic()
+        import anthropic as _anthropic
+        import os as _os
+        _api_key = _os.environ.get("ANTHROPIC_API_KEY")
+        if not _api_key:
+            try:
+                _cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+                _api_key = _cfg.get("anthropic_api_key", "")
+            except Exception:
+                pass
+        client = _anthropic.Anthropic(api_key=_api_key) if _api_key else _anthropic.Anthropic()
 
         prompt = (
             f"Based on these search results about '{company_name}', extract "
@@ -363,7 +371,7 @@ def enrich_company(company_name: str, job_title: str) -> tuple:
         return funding_stage, headcount, recent_news, company_summary
 
     except Exception as exc:
-        log.debug(f"  Enrichment extraction failed for '{company_name}': {exc}")
+        log.warning(f"  Enrichment extraction failed for '{company_name}': {exc}")
         return None, None, None, None
 
 
@@ -1211,6 +1219,39 @@ def check_stale_jobs(conn) -> int:
 # Main
 # ---------------------------------------------------------------------------
 
+def seed_resumes_if_empty(conn):
+    """
+    Auto-seed resumes from the /resumes folder on first run.
+    Safe to call every run — only inserts/updates, never duplicates.
+    Skips silently if the folder is missing or empty.
+    """
+    resumes_dir = BASE_DIR / "resumes"
+    if not resumes_dir.exists():
+        return
+    txt_files = list(resumes_dir.glob("*.txt"))
+    if not txt_files:
+        return
+    cur = conn.cursor()
+    for path in sorted(txt_files):
+        name    = path.stem
+        content = path.read_text(encoding="utf-8").strip()
+        cur.execute("SELECT id FROM resumes WHERE name = %s", (name,))
+        if cur.fetchone():
+            cur.execute(
+                "UPDATE resumes SET content = %s, uploaded_at = NOW() WHERE name = %s",
+                (content, name)
+            )
+            log.info(f"  Resume updated: {name}")
+        else:
+            cur.execute(
+                "INSERT INTO resumes (name, content) VALUES (%s, %s)",
+                (name, content)
+            )
+            log.info(f"  Resume seeded: {name}")
+    conn.commit()
+    cur.close()
+
+
 def run():
     log.info("=" * 60)
     log.info("Job Tracker starting")
@@ -1236,6 +1277,7 @@ def run():
 
     # --- Phase 2: Connect to DB and save new jobs ---
     conn = init_db()
+    seed_resumes_if_empty(conn)
     new_jobs_by_campaign: dict[str, list[dict]] = {}
 
     for campaign_name, candidates in all_candidates.items():
