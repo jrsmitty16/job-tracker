@@ -4,12 +4,15 @@ Job Tracker Dashboard
 Interactive web dashboard — run this then open http://localhost:5000 in your browser.
 """
 
+import os
 import threading
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 from flask import Flask, jsonify, request
 from db import get_conn
+
+DASHBOARD_TITLE = os.environ.get("DASHBOARD_TITLE", "Job Tracker Dashboard")
 
 app = Flask(__name__)
 
@@ -1182,7 +1185,7 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") closeCLModal
 
 @app.route("/")
 def index():
-    return DASHBOARD_HTML
+    return DASHBOARD_HTML.replace("Job Tracker Dashboard", DASHBOARD_TITLE)
 
 
 def get_analytics():
