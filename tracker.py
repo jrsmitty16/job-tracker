@@ -126,6 +126,15 @@ def init_db():
             company_summary   TEXT
         )
     """)
+    # Resumes table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS resumes (
+            id          SERIAL PRIMARY KEY,
+            name        TEXT UNIQUE NOT NULL,
+            content     TEXT,
+            uploaded_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
     # Safe migration: add columns introduced after the initial schema
     for _ddl in [
         "ALTER TABLE seen_jobs ADD COLUMN IF NOT EXISTS nudge TEXT",
