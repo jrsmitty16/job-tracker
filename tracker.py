@@ -4,6 +4,7 @@ Job Board Tracker
 Monitors multiple job boards for new postings and sends notifications.
 """
 
+import os
 import psycopg2
 import feedparser
 import requests
@@ -994,7 +995,7 @@ def send_email(config: dict, jobs_by_campaign: dict[str, list[dict]], last_email
         with smtplib.SMTP(smtp_host, smtp_port) as smtp:
             smtp.ehlo()
             smtp.starttls()
-            smtp.login(cfg["username"], cfg["password"])
+            smtp.login(cfg["username"], os.environ.get("EMAIL_PASSWORD") or cfg.get("password", ""))
             smtp.send_message(msg)
         log.info(f"Email sent — {total} new jobs to {msg['To']}")
         return True
@@ -1184,7 +1185,7 @@ def send_weekly_digest(config: dict, conn, since: datetime):
         with smtplib.SMTP(smtp_host, smtp_port) as smtp:
             smtp.ehlo()
             smtp.starttls()
-            smtp.login(cfg["username"], cfg["password"])
+            smtp.login(cfg["username"], os.environ.get("EMAIL_PASSWORD") or cfg.get("password", ""))
             smtp.send_message(msg)
         log.info(f"Weekly digest sent to {msg['To']}")
         return True
