@@ -644,7 +644,7 @@ def fetch_himalayas(query: str) -> list[dict]:
     """Fetch from Himalayas — startup/remote-focused job board with free API."""
     url = "https://himalayas.app/jobs/api/search"
     try:
-        resp = requests.get(url, params={"q": query, "sort": "recent", "limit": 20},
+        resp = requests.get(url, params={"q": query, "sort": "recent", "limit": 50},
                             headers=HEADERS, timeout=15)
         data = resp.json()
         jobs = []
@@ -696,7 +696,7 @@ def fetch_remotive(query: str) -> list[dict]:
     """Fetch from Remotive — remote tech jobs with free API (rate-limited)."""
     url = "https://remotive.com/api/remote-jobs"
     try:
-        resp = requests.get(url, params={"search": query, "limit": 10},
+        resp = requests.get(url, params={"search": query, "limit": 50},
                             headers=HEADERS, timeout=15)
         data = resp.json()
         jobs = []
@@ -717,8 +717,52 @@ def fetch_remotive(query: str) -> list[dict]:
         return []
 
 
+def fetch_adzuna(query: str) -> list[dict]:
+    """
+    Fetch from Adzuna — official API covering millions of US jobs including
+    on-site and hybrid roles. Activates only when ADZUNA_APP_ID and
+    ADZUNA_APP_KEY env vars are set (free at developer.adzuna.com).
+    """
+    import os
+    app_id  = os.environ.get("ADZUNA_APP_ID")
+    app_key = os.environ.get("ADZUNA_APP_KEY")
+    if not app_id or not app_key:
+        return []
+    url = "https://api.adzuna.com/v1/api/jobs/us/search/1"
+    try:
+        resp = requests.get(url, params={
+            "app_id":           app_id,
+            "app_key":          app_key,
+            "what":             query,
+            "results_per_page": 50,
+            "max_days_old":     7,
+            "sort_by":          "date",
+        }, headers=HEADERS, timeout=15)
+        data = resp.json()
+        jobs = []
+        for item in data.get("results", []):
+            loc_parts = (item.get("location") or {}).get("area") or []
+            location  = ", ".join(loc_parts[1:]) if len(loc_parts) > 1 else \
+                        (item.get("location") or {}).get("display_name", "")
+            jobs.append({
+                "title":       item.get("title", "").replace("<strong>", "").replace("</strong>", ""),
+                "company":     (item.get("company") or {}).get("display_name", ""),
+                "location":    location,
+                "url":         item.get("redirect_url", ""),
+                "source":      "Adzuna",
+                "posted_at":   parse_date(item.get("created")),
+                "description": strip_html(item.get("description", "")),
+            })
+        log.info(f"  Adzuna     '{query}': {len(jobs)} results")
+        return jobs
+    except Exception as exc:
+        log.warning(f"  Adzuna fetch failed for '{query}': {exc}")
+        return []
+
+
 SOURCES = [fetch_indeed, fetch_himalayas, fetch_remotive,
-           fetch_remoteok, fetch_arbeitnow, fetch_weworkremotely, fetch_jobicy]
+           fetch_remoteok, fetch_arbeitnow, fetch_weworkremotely, fetch_jobicy,
+           fetch_adzuna]
 # fetch_linkedin paused
 
 
