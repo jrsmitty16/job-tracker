@@ -166,18 +166,45 @@ def is_new(conn, jid: str) -> bool:
 # Relevance Scoring — LLM-based via Anthropic
 # ---------------------------------------------------------------------------
 
+_DEFAULT_PROFILE = {
+    "name": "the candidate",
+    "summary": (
+        "10+ years recruiting experience, founding recruiter at multiple startups, "
+        "strong focus on AI/ML and technical hiring, full-cycle recruiting, "
+        "talent acquisition leadership, experience at high-growth Series A-C companies."
+    ),
+    "role": "senior technical recruiter",
+}
+
+
+def get_candidate_profile() -> dict:
+    """
+    Read the candidate profile from config.yaml. Falls back to defaults
+    for backward compatibility with configs that predate this field.
+    """
+    try:
+        cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+        profile = cfg.get("candidate", {}) or {}
+        return {
+            "name":    profile.get("name")    or _DEFAULT_PROFILE["name"],
+            "summary": profile.get("summary") or _DEFAULT_PROFILE["summary"],
+            "role":    profile.get("role")    or _DEFAULT_PROFILE["role"],
+        }
+    except Exception:
+        return dict(_DEFAULT_PROFILE)
+
+
 def score_job_with_llm(title: str, company: str, description: str = "") -> tuple[int, str]:
-    """Score a job 1-5 using Claude Haiku based on Corey's recruiter background."""
+    """Score a job 1-5 using Claude Haiku based on the candidate's background."""
     try:
         import anthropic
         client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from environment
 
+        profile = get_candidate_profile()
         desc_snippet = description[:1500] if description else "Not available"
         prompt = (
-            "You are evaluating job fit for a senior technical recruiter.\n"
-            "Background: 10+ years recruiting experience, founding recruiter at multiple startups, "
-            "strong focus on AI/ML and technical hiring, full-cycle recruiting, "
-            "talent acquisition leadership, experience at high-growth Series A-C companies.\n\n"
+            f"You are evaluating job fit for a {profile['role']}.\n"
+            f"Background: {profile['summary']}\n\n"
             f"Job details:\n"
             f"- Title: {title}\n"
             f"- Company: {company}\n"
@@ -784,11 +811,11 @@ def generate_email_digest(all_jobs: list[dict], total: int) -> str | None:
                 f"resume note: {j.get('resume_rationale', 'N/A')})"
             )
 
+        profile = get_candidate_profile()
         prompt = (
-            "You are writing a brief, conversational email digest for Corey Weil, a senior technical recruiter.\n\n"
-            "Corey's background: 10+ years recruiting experience, previously at Trilogy Education "
-            "(acquired for $750M), Presidents Club winner, targeting founding recruiter and senior "
-            "technical recruiter roles at Series A/B startups. Also exploring AI Operations roles.\n\n"
+            f"You are writing a brief, conversational email digest for {profile['name']}, "
+            f"a {profile['role']}.\n\n"
+            f"{profile['name']}'s background: {profile['summary']}\n\n"
             f"New job matches ({total} total):\n" + "\n".join(job_lines) + "\n\n"
             "Write a short, conversational email digest (3-5 sentences) that:\n"
             "1. Opens with a one-line summary (e.g. '8 new matches came in since your last check')\n"
