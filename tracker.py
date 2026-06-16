@@ -150,6 +150,26 @@ def init_db():
     return conn
 
 
+def parse_llm_json(content: str) -> dict:
+    """
+    Parse JSON from an LLM response, tolerating markdown fences and any
+    trailing prose after the JSON object (a common cause of
+    'Extra data: line N' json.loads errors).
+    """
+    content = content.strip()
+    if content.startswith("```"):
+        content = re.sub(r"^```[a-z]*\n?", "", content)
+        content = re.sub(r"\n?```$", "", content).strip()
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        # Fall back to the first balanced {...} object in the text
+        match = re.search(r"\{.*?\}", content, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        raise
+
+
 def job_fingerprint(title: str, company: str, url: str) -> str:
     key = f"{title.lower()}|{company.lower()}|{url.lower()}"
     return hashlib.md5(key.encode()).hexdigest()
@@ -225,12 +245,7 @@ def score_job_with_llm(title: str, company: str, description: str = "") -> tuple
             max_tokens=100,
             messages=[{"role": "user", "content": prompt}],
         )
-        content = message.content[0].text.strip()
-        # Strip markdown code fences if present
-        if content.startswith("```"):
-            content = re.sub(r"^```[a-z]*\n?", "", content)
-            content = re.sub(r"\n?```$", "", content).strip()
-        result    = json.loads(content)
+        result    = parse_llm_json(message.content[0].text)
         score     = max(1, min(5, int(result["score"])))
         rationale = str(result.get("rationale", ""))[:300]
         return score, rationale
@@ -280,11 +295,7 @@ def match_resume_to_job(conn, title: str, company: str, description: str = "") -
                 max_tokens=100,
                 messages=[{"role": "user", "content": prompt}],
             )
-            content = message.content[0].text.strip()
-            if content.startswith("```"):
-                content = re.sub(r"^```[a-z]*\n?", "", content)
-                content = re.sub(r"\n?```$", "", content).strip()
-            result    = json.loads(content)
+            result    = parse_llm_json(message.content[0].text)
             r_score   = max(1, min(5, int(result["score"])))
             r_rationale = str(result.get("rationale", ""))[:300]
 
@@ -388,12 +399,7 @@ def enrich_company(company_name: str, job_title: str) -> tuple:
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
-        content = message.content[0].text.strip()
-        if content.startswith("```"):
-            content = re.sub(r"^```[a-z]*\n?", "", content)
-            content = re.sub(r"\n?```$", "", content).strip()
-
-        result = json.loads(content)
+        result = parse_llm_json(message.content[0].text)
 
         def _clean(v, maxlen):
             s = str(v).strip() if v else ""
@@ -898,6 +904,54 @@ def generate_email_digest(all_jobs: list[dict], total: int) -> str | None:
         return None
 
 
+def deliver_email(cfg: dict, subject: str, html_body: str, to_addr: str) -> bool:
+    """
+    Send an HTML email. Prefers the Resend HTTP API (RESEND_API_KEY env var)
+    because hosts like Railway block outbound SMTP ports. Falls back to SMTP
+    when no Resend key is configured (e.g. local runs).
+    """
+    resend_key = os.environ.get("RESEND_API_KEY")
+    if resend_key:
+        # Resend requires a verified sender; default to its shared onboarding
+        # domain unless EMAIL_FROM is set to a domain you've verified.
+        from_addr = os.environ.get("EMAIL_FROM", "Job Tracker <onboarding@resend.dev>")
+        try:
+            resp = requests.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {resend_key}",
+                         "Content-Type": "application/json"},
+                json={"from": from_addr, "to": [to_addr],
+                      "subject": subject, "html": html_body},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            log.info(f"Email sent via Resend to {to_addr}")
+            return True
+        except Exception as exc:
+            log.error(f"Resend send failed: {exc}")
+            return False
+
+    # SMTP fallback
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"]    = cfg.get("username", "")
+        msg["To"]      = to_addr
+        msg.attach(MIMEText(html_body, "html"))
+        smtp_host = cfg.get("smtp_host", "smtp.gmail.com")
+        smtp_port = cfg.get("smtp_port", 587)
+        with smtplib.SMTP(smtp_host, smtp_port) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.login(cfg["username"], os.environ.get("EMAIL_PASSWORD") or cfg.get("password", ""))
+            smtp.send_message(msg)
+        log.info(f"Email sent via SMTP to {to_addr}")
+        return True
+    except Exception as exc:
+        log.error(f"SMTP send failed: {exc}")
+        return False
+
+
 def send_email(config: dict, jobs_by_campaign: dict[str, list[dict]], last_email_at: datetime | None):
     cfg = config.get("email", {})
     if not cfg.get("enabled"):
@@ -933,11 +987,6 @@ def send_email(config: dict, jobs_by_campaign: dict[str, list[dict]], last_email
         f"[Job Tracker] {total} new match{'es' if total != 1 else ''} — {top_company} looks strong"
         if top_company else f"[Job Tracker] {total} new job match{'es' if total != 1 else ''}"
     )
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"]    = cfg["username"]
-    msg["To"]      = cfg.get("to", cfg["username"])
 
     # Generate AI narrative
     narrative = generate_email_digest(all_jobs_flat, total)
@@ -985,23 +1034,11 @@ def send_email(config: dict, jobs_by_campaign: dict[str, list[dict]], last_email
             )
         html.append("</table><br>")
 
-    html.append("<p style='color:#999;font-size:12px'>Sent by Job Tracker &mdash; running on your machine</p>")
+    html.append("<p style='color:#999;font-size:12px'>Sent by Job Tracker</p>")
     html.append("</body></html>")
-    msg.attach(MIMEText("\n".join(html), "html"))
 
-    try:
-        smtp_host = cfg.get("smtp_host", "smtp.gmail.com")
-        smtp_port = cfg.get("smtp_port", 587)
-        with smtplib.SMTP(smtp_host, smtp_port) as smtp:
-            smtp.ehlo()
-            smtp.starttls()
-            smtp.login(cfg["username"], os.environ.get("EMAIL_PASSWORD") or cfg.get("password", ""))
-            smtp.send_message(msg)
-        log.info(f"Email sent — {total} new jobs to {msg['To']}")
-        return True
-    except Exception as exc:
-        log.error(f"Email failed: {exc}")
-        return False
+    to_addr = cfg.get("to", cfg.get("username", ""))
+    return deliver_email(cfg, subject, "\n".join(html), to_addr)
 
 
 def send_desktop_notification(title: str, message: str):
@@ -1126,10 +1163,8 @@ def send_weekly_digest(config: dict, conn, since: datetime):
     stats    = get_weekly_stats(conn, since)
     pipeline = get_pipeline_summary(conn)
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"[Job Tracker] Weekly Digest — week of {since.strftime('%b %d')}"
-    msg["From"]    = cfg["username"]
-    msg["To"]      = cfg.get("to", cfg["username"])
+    weekly_subject = f"[Job Tracker] Weekly Digest — week of {since.strftime('%b %d')}"
+    weekly_to      = cfg.get("to", cfg["username"])
 
     html = ["<html><body style='font-family:Arial,sans-serif;max-width:700px;margin:auto;color:#333'>"]
     html.append(f"<h1 style='color:#2c3e50'>Weekly Job Search Digest</h1>")
@@ -1175,23 +1210,10 @@ def send_weekly_digest(config: dict, conn, since: datetime):
             html.append(f"<li><a href='{url}'>{title}</a> at {company}</li>")
         html.append("</ul>")
 
-    html.append("<p style='color:#999;font-size:12px;margin-top:30px'>Sent by Job Tracker &mdash; running on your machine</p>")
+    html.append("<p style='color:#999;font-size:12px;margin-top:30px'>Sent by Job Tracker</p>")
     html.append("</body></html>")
-    msg.attach(MIMEText("\n".join(html), "html"))
 
-    try:
-        smtp_host = cfg.get("smtp_host", "smtp.gmail.com")
-        smtp_port = cfg.get("smtp_port", 587)
-        with smtplib.SMTP(smtp_host, smtp_port) as smtp:
-            smtp.ehlo()
-            smtp.starttls()
-            smtp.login(cfg["username"], os.environ.get("EMAIL_PASSWORD") or cfg.get("password", ""))
-            smtp.send_message(msg)
-        log.info(f"Weekly digest sent to {msg['To']}")
-        return True
-    except Exception as exc:
-        log.error(f"Weekly digest failed: {exc}")
-        return False
+    return deliver_email(cfg, weekly_subject, "\n".join(html), weekly_to)
 
 
 # ---------------------------------------------------------------------------
@@ -1291,11 +1313,7 @@ def check_stale_jobs(conn) -> int:
                     max_tokens=80,
                     messages=[{"role": "user", "content": prompt}],
                 )
-                content = msg.content[0].text.strip()
-                if content.startswith("```"):
-                    content = re.sub(r"^```[a-z]*\n?", "", content)
-                    content = re.sub(r"\n?```$", "", content).strip()
-                result = json.loads(content)
+                result = parse_llm_json(msg.content[0].text)
                 nudge_text = str(result.get("nudge", nudge_text))[:200]
             except Exception as exc:
                 log.debug(f"Nudge LLM failed for '{title}': {exc}")
