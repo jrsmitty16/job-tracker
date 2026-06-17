@@ -417,6 +417,7 @@ a:hover { text-decoration: underline; }
     <button id="btn-board" class="view-btn"        onclick="setView('board')">⬛ Board</button>
   </div>
   <span class="updated" id="updated-label"></span>
+  <span class="updated" style="opacity:.4;font-size:11px">v6</span>
 </div>
 
 <div class="main">
@@ -1832,6 +1833,14 @@ async function deleteCampaign(name) {
     document.getElementById("count-label").style.display    = "none";
   }
 })();
+window.onerror = function(msg, src, line, col, err) {
+  var d = document.getElementById("js-error-banner");
+  if (!d) { d = document.createElement("div"); d.id="js-error-banner";
+    d.style.cssText="position:fixed;top:0;left:0;right:0;background:#c0392b;color:#fff;padding:10px 16px;font-size:13px;z-index:9999;";
+    document.body.prepend(d); }
+  d.textContent = "JS error (line " + line + "): " + msg;
+  return false;
+};
 renderCampaignTabs();
 loadData();
 setInterval(loadData, 60000);  // auto-refresh every minute
