@@ -1902,7 +1902,7 @@ def api_update_status():
     return jsonify({"ok": False}), 400
 
 
-@app.route("/api/init-db", methods=["POST"])
+@app.route("/api/init-db", methods=["GET", "POST"])
 def api_init_db():
     conn = get_conn()
     try:
