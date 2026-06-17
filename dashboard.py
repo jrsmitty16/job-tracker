@@ -4,6 +4,7 @@ Job Tracker Dashboard
 Interactive web dashboard — run this then open http://localhost:5000 in your browser.
 """
 
+import json
 import os
 import threading
 import webbrowser
@@ -11,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from flask import Flask, jsonify, request
 from db import get_conn
+
+CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
 DASHBOARD_TITLE = os.environ.get("DASHBOARD_TITLE", "Job Tracker Dashboard")
 
@@ -292,6 +295,43 @@ a:hover { text-decoration: underline; }
 .cl-card-link { background:none; border:none; color:#2980b9; font-size:11px;
                 cursor:pointer; padding:0; text-decoration:underline; }
 .cl-card-link:hover { color:#1a5276; }
+
+/* Campaign editor */
+.tab.campaigns-tab { background: #16a085; color: #fff; border-color: #16a085; }
+.tab.campaigns-tab:hover { background: #138d75; border-color: #138d75; }
+.ce-hdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.ce-hdr h2 { font-size: 18px; font-weight: 700; color: #2c3e50; }
+.ce-add-btn { background: #27ae60; color: #fff; border: none; padding: 9px 18px;
+              border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; }
+.ce-add-btn:hover { background: #219a52; }
+.ce-card { background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.08);
+           padding: 20px 24px; margin-bottom: 16px; }
+.ce-name-row { display: flex; align-items: center; gap: 12px; margin-bottom: 16px;
+               padding-bottom: 14px; border-bottom: 1px solid #f0f2f5; }
+.ce-cname { font-size: 16px; font-weight: 700; color: #2c3e50; flex: 1; }
+.ce-name-input { flex: 1; padding: 7px 12px; border: 1px solid #ddd; border-radius: 6px;
+                 font-size: 15px; font-weight: 600; color: #2c3e50; }
+.ce-section { margin-bottom: 14px; }
+.ce-slabel { font-size: 11px; font-weight: 700; color: #888; text-transform: uppercase;
+             letter-spacing: .5px; margin-bottom: 6px; }
+.ce-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 5px; min-height: 24px; }
+.ce-chip { display: inline-flex; align-items: center; gap: 3px; background: #eaf2ff;
+           color: #2471a3; border: 1px solid #aed6f1; border-radius: 14px;
+           padding: 3px 9px; font-size: 12px; font-weight: 500; }
+.ce-chip-x { background: none; border: none; cursor: pointer; color: #5d6d7e;
+             font-size: 14px; line-height: 1; padding: 0 1px; }
+.ce-chip-x:hover { color: #c0392b; }
+.ce-input { border: 1px solid #ddd; border-radius: 14px; padding: 3px 10px;
+            font-size: 12px; outline: none; width: 180px; }
+.ce-input:focus { border-color: #2980b9; }
+.ce-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 12px;
+              padding-top: 14px; border-top: 1px solid #f0f2f5; }
+.ce-save-btn { background: #2980b9; color: #fff; border: none; padding: 8px 20px;
+               border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; }
+.ce-save-btn:hover { background: #2471a3; }
+.ce-del-btn { background: none; color: #c0392b; border: 1px solid #e0b0b0; padding: 8px 14px;
+              border-radius: 6px; font-size: 13px; cursor: pointer; }
+.ce-del-btn:hover { background: #fdf0ef; border-color: #c0392b; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
@@ -403,6 +443,15 @@ a:hover { text-decoration: underline; }
     </div>
   </div>
 
+  <!-- Campaign Editor Panel -->
+  <div id="campaigns-panel" style="display:none">
+    <div class="ce-hdr">
+      <h2>Campaign Editor</h2>
+      <button class="ce-add-btn" onclick="addNewCampaign()">+ New Campaign</button>
+    </div>
+    <div id="campaigns-list"></div>
+  </div>
+
   <!-- Table -->
   <div id="job-table-wrap">
   <div class="card">
@@ -463,16 +512,18 @@ const STATUS_ORDER  = ["New","Applied","Interviewing","Offer","Rejected/Passed"]
 const SCORE_COLORS  = ["#bdc3c7","#e67e22","#f1c40f","#2ecc71","#27ae60"];
 
 let allJobs = [];
-let activeStatus     = "all";
-let activeCampaign   = "all";
-let showingAnalytics = false;
-let analyticsCharts  = {};
-let currentView      = localStorage.getItem("jobTrackerView") || "table";
+let activeStatus      = "all";
+let activeCampaign    = "all";
+let showingAnalytics  = false;
+let showingCampaigns  = false;
+let analyticsCharts   = {};
+let currentView       = localStorage.getItem("jobTrackerView") || "table";
 let sortableInstances = [];
+let campaignsData     = [];
 
 // ---- Load data ----
 async function loadData() {
-  if (showingAnalytics) return;   // don't clobber analytics view on auto-refresh
+  if (showingAnalytics || showingCampaigns) return;
   const res  = await fetch("/api/jobs");
   const data = await res.json();
   allJobs = data.jobs;
@@ -550,13 +601,16 @@ function renderPipeline(pipeline) {
 // ---- Campaign tabs ----
 function renderCampaignTabs() {
   const campaigns = ["all", ...new Set(allJobs.map(j => j.campaign))];
+  const isNormal  = !showingAnalytics && !showingCampaigns;
   const box = document.getElementById("campaign-tabs");
   box.innerHTML = campaigns.map(c =>
-    `<div class="tab ${activeCampaign===c && !showingAnalytics?'active':''}" onclick="filterCampaign('${c}')">
+    `<div class="tab ${activeCampaign===c && isNormal?'active':''}" onclick="filterCampaign('${c}')">
       ${c === "all" ? "All Campaigns" : c}</div>`
   ).join("") +
   `<div class="tab${showingAnalytics?' analytics-tab':''}" onclick="openAnalyticsTab()" style="margin-left:12px">
-    📊 Analytics</div>`;
+    📊 Analytics</div>` +
+  `<div class="tab${showingCampaigns?' campaigns-tab':''}" onclick="openCampaignsTab()" style="margin-left:6px">
+    ⚙ Campaigns</div>`;
 }
 
 // ---- Table ----
@@ -734,6 +788,7 @@ function filterStatus(s) {
 
 function filterCampaign(c) {
   if (showingAnalytics) closeAnalytics();
+  if (showingCampaigns) closeCampaigns();
   activeCampaign = c;
   renderCampaignTabs();
   if (currentView === "board") renderBoard();
@@ -974,6 +1029,7 @@ function updateKanbanCounts() {
 
 // ---- Analytics ----
 async function openAnalyticsTab() {
+  if (showingCampaigns) closeCampaigns();
   showingAnalytics = true;
   document.getElementById("job-table-wrap").style.display  = "none";
   document.getElementById("kanban-wrap").style.display     = "none";
@@ -1162,6 +1218,222 @@ function downloadCoverLetter() {
 
 function regenerateCoverLetter() { fetchCoverLetter(); }
 
+// ---- Campaign Editor ----
+const CE_FILTER_FIELDS = [
+  { key: "title_must_include",       label: "Title Must Include" },
+  { key: "title_must_exclude",       label: "Title Must Exclude" },
+  { key: "title_ai_specific",        label: "Title AI-Specific Keywords" },
+  { key: "description_must_include", label: "Description Must Include" },
+  { key: "location_allow",           label: "Locations Allowed" },
+];
+
+function ceEsc(s) {
+  return String(s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+}
+
+function ceChipHtml(idx, field, value) {
+  const safe = ceEsc(value);
+  return `<span class="ce-chip" data-field="${field}" data-value="${safe}">${safe
+    }<button class="ce-chip-x" onclick="this.closest('.ce-chip').remove()" title="Remove">&times;</button></span>`;
+}
+
+function buildCampaignCard(c, idx) {
+  const filterSections = CE_FILTER_FIELDS.map(f => `
+    <div class="ce-section">
+      <div class="ce-slabel">${f.label}</div>
+      <div class="ce-chips" id="chips-${idx}-${f.key}">
+        ${((c.filters||{})[f.key]||[]).map(v => ceChipHtml(idx, f.key, v)).join("")}
+      </div>
+      <input class="ce-input" placeholder="Add keyword, press Enter"
+        onkeydown="ceAddChip(event,${idx},'${f.key}')">
+    </div>`).join("");
+
+  return `<div class="ce-card" id="cecard-${idx}">
+    <div class="ce-name-row">
+      <span class="ce-cname">${ceEsc(c.name)}</span>
+      <button class="ce-del-btn" onclick="deleteCampaign('${ceEsc(c.name)}')">Delete</button>
+    </div>
+    <div class="ce-section">
+      <div class="ce-slabel">Search Queries</div>
+      <div class="ce-chips" id="chips-${idx}-queries">
+        ${(c.queries||[]).map(q => ceChipHtml(idx, "queries", q)).join("")}
+      </div>
+      <input class="ce-input" placeholder="Add query, press Enter"
+        onkeydown="ceAddChip(event,${idx},'queries')">
+    </div>
+    ${filterSections}
+    <div class="ce-actions">
+      <button class="ce-save-btn" onclick="saveCampaign(${idx},'${ceEsc(c.name)}')">Save Campaign</button>
+    </div>
+  </div>`;
+}
+
+function buildNewCampaignCard(idx) {
+  const filterSections = CE_FILTER_FIELDS.map(f => `
+    <div class="ce-section">
+      <div class="ce-slabel">${f.label}</div>
+      <div class="ce-chips" id="chips-${idx}-${f.key}"></div>
+      <input class="ce-input" placeholder="Add keyword, press Enter"
+        onkeydown="ceAddChip(event,${idx},'${f.key}')">
+    </div>`).join("");
+
+  return `<div class="ce-card" id="cecard-${idx}">
+    <div class="ce-name-row">
+      <input class="ce-name-input" id="cename-${idx}" placeholder="Campaign name (e.g. AI Recruiting)">
+    </div>
+    <div class="ce-section">
+      <div class="ce-slabel">Search Queries</div>
+      <div class="ce-chips" id="chips-${idx}-queries"></div>
+      <input class="ce-input" placeholder="Add query, press Enter"
+        onkeydown="ceAddChip(event,${idx},'queries')">
+    </div>
+    ${filterSections}
+    <div class="ce-actions">
+      <button class="ce-save-btn" onclick="saveNewCampaign(${idx})">Create Campaign</button>
+    </div>
+  </div>`;
+}
+
+function ceAddChip(e, idx, field) {
+  if (e.key !== "Enter" && e.key !== ",") return;
+  e.preventDefault();
+  const val = e.target.value.trim().replace(/,$/, "");
+  if (!val) return;
+  const container = document.getElementById(`chips-${idx}-${field}`);
+  const span = document.createElement("span");
+  span.className = "ce-chip";
+  span.dataset.field = field;
+  span.dataset.value = val;
+  span.innerHTML = ceEsc(val) +
+    `<button class="ce-chip-x" onclick="this.closest('.ce-chip').remove()" title="Remove">&times;</button>`;
+  container.appendChild(span);
+  e.target.value = "";
+}
+
+function ceGetChips(idx, field) {
+  const el = document.getElementById(`chips-${idx}-${field}`);
+  if (!el) return [];
+  return Array.from(el.querySelectorAll(".ce-chip")).map(c => c.dataset.value);
+}
+
+function ceCollect(idx) {
+  const queries = ceGetChips(idx, "queries");
+  const filters = {};
+  CE_FILTER_FIELDS.forEach(f => {
+    const vals = ceGetChips(idx, f.key);
+    if (vals.length) filters[f.key] = vals;
+  });
+  return { queries, filters };
+}
+
+async function openCampaignsTab() {
+  if (showingAnalytics) closeAnalytics();
+  showingCampaigns = true;
+  document.getElementById("job-table-wrap").style.display  = "none";
+  document.getElementById("kanban-wrap").style.display     = "none";
+  document.getElementById("search").style.display          = "none";
+  document.getElementById("count-label").style.display     = "none";
+  document.getElementById("analytics-panel").style.display = "none";
+  document.getElementById("campaigns-panel").style.display = "block";
+  renderCampaignTabs();
+  await loadCampaigns();
+}
+
+function closeCampaigns() {
+  showingCampaigns = false;
+  document.getElementById("campaigns-panel").style.display = "none";
+  if (currentView === "board") {
+    document.getElementById("kanban-wrap").style.display    = "block";
+    document.getElementById("job-table-wrap").style.display = "none";
+    document.getElementById("search").style.display         = "none";
+    document.getElementById("count-label").style.display    = "none";
+    renderBoard();
+  } else {
+    document.getElementById("job-table-wrap").style.display = "block";
+    document.getElementById("kanban-wrap").style.display    = "none";
+    document.getElementById("search").style.display         = "";
+    document.getElementById("count-label").style.display    = "";
+    renderTable();
+  }
+  renderCampaignTabs();
+}
+
+async function loadCampaigns() {
+  try {
+    const res  = await fetch("/api/campaigns");
+    const data = await res.json();
+    campaignsData = data.campaigns || [];
+    renderCampaignCards();
+  } catch(err) {
+    document.getElementById("campaigns-list").innerHTML =
+      '<p style="color:#e74c3c;padding:20px">Failed to load campaigns.</p>';
+  }
+}
+
+function renderCampaignCards() {
+  const list = document.getElementById("campaigns-list");
+  if (!campaignsData.length) {
+    list.innerHTML = '<p style="color:#aaa;text-align:center;padding:40px 0">No campaigns yet. Click "+ New Campaign" to create one.</p>';
+    return;
+  }
+  list.innerHTML = campaignsData.map((c, i) => buildCampaignCard(c, i)).join("");
+}
+
+function addNewCampaign() {
+  const idx = campaignsData.length;
+  campaignsData.push({ name: "__new__", queries: [], filters: {} });
+  const list = document.getElementById("campaigns-list");
+  const div  = document.createElement("div");
+  div.innerHTML = buildNewCampaignCard(idx);
+  list.appendChild(div.firstChild);
+  document.getElementById(`cename-${idx}`).focus();
+}
+
+async function saveCampaign(idx, name) {
+  const { queries, filters } = ceCollect(idx);
+  const res  = await fetch("/api/campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, queries, filters }),
+  });
+  const data = await res.json();
+  if (data.ok) showToast("Campaign saved");
+  else showToast("Save failed: " + (data.error || "unknown error"), "#e74c3c");
+}
+
+async function saveNewCampaign(idx) {
+  const nameEl = document.getElementById(`cename-${idx}`);
+  const name   = (nameEl ? nameEl.value.trim() : "");
+  if (!name) { showToast("Campaign name is required", "#e74c3c"); return; }
+  const { queries, filters } = ceCollect(idx);
+  const res  = await fetch("/api/campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, queries, filters }),
+  });
+  const data = await res.json();
+  if (data.ok) {
+    showToast("Campaign created");
+    await loadCampaigns();
+  } else {
+    showToast("Create failed: " + (data.error || "unknown error"), "#e74c3c");
+  }
+}
+
+async function deleteCampaign(name) {
+  if (!confirm(`Delete campaign "${name}"? This cannot be undone.`)) return;
+  const res  = await fetch("/api/campaigns/" + encodeURIComponent(name), { method: "DELETE" });
+  const data = await res.json();
+  if (data.ok) {
+    showToast("Campaign deleted", "#c0392b");
+    await loadCampaigns();
+  } else {
+    showToast("Delete failed", "#e74c3c");
+  }
+}
+
 // ---- Init ----
 // Apply stored view preference immediately (before data arrives)
 (function applyStoredView() {
@@ -1176,7 +1448,12 @@ function regenerateCoverLetter() { fetchCoverLetter(); }
 })();
 loadData();
 setInterval(loadData, 60000);  // auto-refresh every minute
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeCLModal(); });
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") {
+    closeCLModal();
+    if (showingCampaigns) closeCampaigns();
+  }
+});
 </script>
 </body>
 </html>
@@ -1407,6 +1684,88 @@ def api_update_status():
         cur.close(); conn.close()
         return jsonify({"ok": True})
     return jsonify({"ok": False}), 400
+
+
+def _ensure_campaigns_table(conn):
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS campaigns (
+            id         SERIAL PRIMARY KEY,
+            name       TEXT UNIQUE NOT NULL,
+            queries    JSONB NOT NULL DEFAULT '[]',
+            filters    JSONB NOT NULL DEFAULT '{}',
+            enabled    BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    conn.commit()
+    cur.close()
+
+
+@app.route("/api/campaigns", methods=["GET"])
+def api_get_campaigns():
+    conn = get_conn()
+    try:
+        _ensure_campaigns_table(conn)
+        cur = conn.cursor()
+        cur.execute("SELECT name, queries, filters, enabled FROM campaigns ORDER BY id")
+        rows = cur.fetchall()
+        cur.close()
+        campaigns = [
+            {"name": r[0], "queries": r[1] or [], "filters": r[2] or {}, "enabled": r[3]}
+            for r in rows
+        ]
+        return jsonify({"campaigns": campaigns})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/api/campaigns", methods=["POST"])
+def api_save_campaign():
+    data    = request.get_json()
+    name    = (data.get("name") or "").strip()
+    queries = data.get("queries", [])
+    filters = data.get("filters", {})
+    if not name:
+        return jsonify({"error": "name required"}), 400
+    if not isinstance(queries, list):
+        return jsonify({"error": "queries must be a list"}), 400
+    conn = get_conn()
+    try:
+        _ensure_campaigns_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO campaigns (name, queries, filters)
+               VALUES (%s, %s::jsonb, %s::jsonb)
+               ON CONFLICT (name) DO UPDATE
+                 SET queries = EXCLUDED.queries,
+                     filters = EXCLUDED.filters""",
+            (name, json.dumps(queries), json.dumps(filters)),
+        )
+        conn.commit()
+        cur.close()
+        return jsonify({"ok": True})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/api/campaigns/<name>", methods=["DELETE"])
+def api_delete_campaign(name):
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM campaigns WHERE name = %s", (name,))
+        conn.commit()
+        cur.close()
+        return jsonify({"ok": True})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+    finally:
+        conn.close()
 
 
 def open_browser():

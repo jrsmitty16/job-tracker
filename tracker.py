@@ -136,6 +136,17 @@ def init_db():
             uploaded_at TIMESTAMPTZ DEFAULT NOW()
         )
     """)
+    # Campaigns table (edited via dashboard)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS campaigns (
+            id         SERIAL PRIMARY KEY,
+            name       TEXT UNIQUE NOT NULL,
+            queries    JSONB NOT NULL DEFAULT '[]',
+            filters    JSONB NOT NULL DEFAULT '{}',
+            enabled    BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
     # Safe migration: add columns introduced after the initial schema
     for _ddl in [
         "ALTER TABLE seen_jobs ADD COLUMN IF NOT EXISTS nudge TEXT",
@@ -1366,6 +1377,29 @@ def seed_resumes_if_empty(conn):
     cur.close()
 
 
+def load_campaigns_from_db(conn) -> dict:
+    """Load campaigns from the DB campaigns table. Returns {} if table is empty."""
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name, queries, filters FROM campaigns WHERE enabled = TRUE ORDER BY id"
+        )
+        rows = cur.fetchall()
+        cur.close()
+        if not rows:
+            return {}
+        result = {}
+        for name, queries, filters in rows:
+            result[name] = {
+                "queries": queries if isinstance(queries, list) else [],
+                "filters": filters if isinstance(filters, dict) else {},
+            }
+        return result
+    except Exception as exc:
+        log.debug(f"Could not load campaigns from DB: {exc}")
+        return {}
+
+
 def run():
     log.info("=" * 60)
     log.info("Job Tracker starting")
@@ -1379,8 +1413,19 @@ def run():
     else:
         log.info("No previous email on record — all qualifying jobs will be included")
 
-    # --- Phase 1: Scrape all job boards (no DB connection held open) ---
-    campaigns: dict = config.get("campaigns", {})
+    # --- Phase 0: Connect to DB, load campaigns ---
+    conn = init_db()
+    seed_resumes_if_empty(conn)
+
+    db_campaigns = load_campaigns_from_db(conn)
+    if db_campaigns:
+        campaigns: dict = db_campaigns
+        log.info(f"Loaded {len(db_campaigns)} campaign(s) from database")
+    else:
+        campaigns = config.get("campaigns", {})
+        log.info(f"No DB campaigns found — using config.yaml ({len(campaigns)} campaign(s))")
+
+    # --- Phase 1: Scrape all job boards ---
     all_candidates: dict[str, list[dict]] = {}
 
     for campaign_name, campaign_cfg in campaigns.items():
@@ -1389,9 +1434,6 @@ def run():
         log.info(f"--- Campaign: {campaign_name} ---")
         all_candidates[campaign_name] = run_campaign(campaign_name, queries, filters)
 
-    # --- Phase 2: Connect to DB and save new jobs ---
-    conn = init_db()
-    seed_resumes_if_empty(conn)
     new_jobs_by_campaign: dict[str, list[dict]] = {}
 
     for campaign_name, candidates in all_candidates.items():
