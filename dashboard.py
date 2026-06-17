@@ -385,25 +385,33 @@ a:hover { text-decoration: underline; }
 .rv-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55);
             z-index:1000; align-items:center; justify-content:center; }
 .rv-modal.open { display:flex; }
-.rv-box { background:#fff; border-radius:12px; width:720px; max-width:94vw;
-          max-height:88vh; display:flex; flex-direction:column;
-          box-shadow:0 8px 40px rgba(0,0,0,.25); }
-.rv-hdr { padding:18px 24px 14px; border-bottom:1px solid #eee;
-          display:flex; align-items:center; justify-content:space-between; }
-.rv-hdr h3 { font-size:16px; font-weight:700; color:#2c3e50; }
+.rv-box { background:#fff; border-radius:12px; width:760px; max-width:94vw;
+          max-height:90vh; display:flex; flex-direction:column;
+          box-shadow:0 8px 40px rgba(0,0,0,.25); transition:all .2s; }
+.rv-modal.rv-fullscreen { padding:0; }
+.rv-modal.rv-fullscreen .rv-box { width:100vw; max-width:100vw; height:100vh;
+          max-height:100vh; border-radius:0; }
+.rv-hdr { padding:14px 20px 12px; border-bottom:1px solid #eee;
+          display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
+.rv-hdr h3 { font-size:15px; font-weight:700; color:#2c3e50; }
 .rv-close { background:none; border:none; font-size:20px; cursor:pointer;
             color:#aaa; line-height:1; padding:2px 6px; border-radius:4px; }
 .rv-close:hover { background:#f5f5f5; color:#555; }
-.rv-body { flex:1; overflow-y:auto; padding:20px 24px; }
+.rv-max-btn { background:none; border:1px solid #ddd; font-size:14px; cursor:pointer;
+              color:#888; line-height:1; padding:3px 8px; border-radius:4px; }
+.rv-max-btn:hover { background:#f5f5f5; color:#333; border-color:#bbb; }
+.rv-body { flex:1; overflow-y:auto; padding:20px 24px; min-height:0; }
 .rv-text { font-size:13px; line-height:1.8; white-space:pre-wrap; color:#333;
            font-family: monospace; }
-.rv-hdr-actions { display:flex; gap:8px; align-items:center; }
+.rv-hdr-actions { display:flex; gap:6px; align-items:center; }
 .rv-dl-btn { background:#27ae60; color:#fff; border:none; padding:6px 14px;
              border-radius:6px; font-size:13px; font-weight:600; cursor:pointer; }
 .rv-dl-btn:hover { background:#219a52; }
-.rv-iframe { width:100%; height:100%; border:none; display:block; min-height:520px; }
-.rv-docx-wrap { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; }
-.rv-docx-wrap section.docx { box-shadow:none !important; margin:0 auto !important; }
+.rv-iframe { width:100%; height:100%; border:none; display:block; min-height:560px; }
+.rv-docx-wrap { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+                line-height:1.6; }
+.rv-docx-wrap h1,.rv-docx-wrap h2,.rv-docx-wrap h3 { margin:.6em 0 .3em; }
+.rv-docx-wrap p { margin:.3em 0; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
@@ -599,6 +607,7 @@ window.addEventListener("unhandledrejection",function(e){
       <h3 id="rv-title">Resume</h3>
       <div class="rv-hdr-actions">
         <button class="rv-dl-btn" id="rv-dl-btn" onclick="rvDownload()">&#x2B07; Download</button>
+        <button class="rv-max-btn" id="rv-max-btn" onclick="rvToggleSize()" title="Toggle fullscreen">&#x26F6;</button>
         <button class="rv-close" onclick="closeRvModal()">&#x2715;</button>
       </div>
     </div>
@@ -1516,14 +1525,13 @@ async function rvOpen(name, mimeType) {
       body.innerHTML = `<iframe class="rv-iframe" src="${fileUrl}"></iframe>`;
 
     } else if (mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
-      // Render DOCX with docx-preview (lazy-loaded)
+      // Render DOCX with mammoth.js (lazy-loaded)
       body.style.padding = "20px 24px";
       body.style.overflow = "auto";
-      // Load docx-preview if not already loaded
-      if (typeof docx === "undefined") {
+      if (typeof mammoth === "undefined") {
         await new Promise((resolve, reject) => {
           const s = document.createElement("script");
-          s.src = "https://cdn.jsdelivr.net/npm/docx-preview@0.3.5/dist/docx-preview.min.js";
+          s.src = "https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js";
           s.onload = resolve;
           s.onerror = reject;
           document.head.appendChild(s);
@@ -1532,15 +1540,12 @@ async function rvOpen(name, mimeType) {
       const resp = await fetch(fileUrl);
       if (!resp.ok) throw new Error("Failed to fetch file");
       const buf  = await resp.arrayBuffer();
+      const result = await mammoth.convertToHtml({ arrayBuffer: buf });
       const wrap = document.createElement("div");
       wrap.className = "rv-docx-wrap";
+      wrap.innerHTML = result.value;
       body.innerHTML = "";
       body.appendChild(wrap);
-      if (typeof docx !== "undefined" && docx.renderAsync) {
-        await docx.renderAsync(buf, wrap, null, { className: "docx", inWrapper: false });
-      } else {
-        wrap.textContent = "(docx-preview library unavailable — use Download instead)";
-      }
 
     } else {
       // Plain text fallback
@@ -1567,8 +1572,19 @@ function rvDownload() {
   a.click();
 }
 
+function rvToggleSize() {
+  const modal = document.getElementById("rv-modal");
+  const btn   = document.getElementById("rv-max-btn");
+  const full  = modal.classList.toggle("rv-fullscreen");
+  btn.textContent = full ? "✖" : "⛶";
+  btn.title       = full ? "Restore size" : "Toggle fullscreen";
+}
+
 function closeRvModal() {
-  document.getElementById("rv-modal").classList.remove("open");
+  const modal = document.getElementById("rv-modal");
+  modal.classList.remove("open");
+  modal.classList.remove("rv-fullscreen");
+  document.getElementById("rv-max-btn").textContent = "⛶";
   document.getElementById("rv-body").innerHTML = "";
   document.body.style.overflow = "";
   rvCurrentName = null;
