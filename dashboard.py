@@ -1412,12 +1412,13 @@ async function rmLoadList() {
         "text/plain": "TXT"
       };
       const extLabel = extMap[mt] || (mt ? mt.split("/").pop().toUpperCase() : "");
+      const extSuffix = extLabel ? "." + extLabel.toLowerCase() : "";
       return `
       <div class="rm-item">
         <span class="rm-item-icon">📄</span>
         <div class="rm-item-info">
-          <div class="rm-item-name">${r.name}</div>
-          <div class="rm-item-meta">${extLabel ? extLabel + " &middot; " : ""}${r.char_count.toLocaleString()} characters &middot; ${r.uploaded_at ? r.uploaded_at.slice(0,10) : ""}</div>
+          <div class="rm-item-name">${ceEsc(r.name)}${extSuffix}</div>
+          <div class="rm-item-meta">${r.char_count.toLocaleString()} characters &middot; ${r.uploaded_at ? r.uploaded_at.slice(0,10) : ""}</div>
         </div>
         <button class="rm-item-view" onclick="rvOpen('${safeName}','${mt}')">View</button>
         <button class="rm-item-del"  onclick="rmDelete('${safeName}')">Delete</button>
