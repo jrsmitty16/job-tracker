@@ -1404,7 +1404,7 @@ async function rmLoadList() {
       return;
     }
     list.innerHTML = data.resumes.map(r => {
-      const safeName = r.name.replace(/\\/g,"\\\\").replace(/'/g,"\\'");
+      const safeName = ceEsc(r.name);
       const mt = r.mime_type || "";
       const extMap = {
         "application/pdf": "PDF",
