@@ -1902,6 +1902,63 @@ def api_update_status():
     return jsonify({"ok": False}), 400
 
 
+@app.route("/api/init-db", methods=["POST"])
+def api_init_db():
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS seen_jobs (
+                id                TEXT PRIMARY KEY,
+                campaign          TEXT,
+                title             TEXT,
+                company           TEXT,
+                location          TEXT,
+                url               TEXT,
+                source            TEXT,
+                found_at          TEXT,
+                posted_at         TEXT,
+                status            TEXT DEFAULT 'New',
+                status_updated_at TEXT,
+                score             INTEGER DEFAULT 0,
+                rationale         TEXT,
+                best_resume       TEXT,
+                resume_score      INTEGER,
+                resume_rationale  TEXT,
+                nudge             TEXT,
+                funding_stage     TEXT,
+                headcount         TEXT,
+                recent_news       TEXT,
+                company_summary   TEXT
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS resumes (
+                id          SERIAL PRIMARY KEY,
+                name        TEXT UNIQUE NOT NULL,
+                content     TEXT,
+                uploaded_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS campaigns (
+                id         SERIAL PRIMARY KEY,
+                name       TEXT UNIQUE NOT NULL,
+                queries    JSONB NOT NULL DEFAULT '[]',
+                filters    JSONB NOT NULL DEFAULT '{}',
+                enabled    BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        conn.commit()
+        cur.close()
+        return jsonify({"ok": True, "message": "All tables created successfully"})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+    finally:
+        conn.close()
+
+
 @app.route("/api/resumes", methods=["GET"])
 def api_get_resumes():
     conn = get_conn()
