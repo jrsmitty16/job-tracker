@@ -669,18 +669,17 @@ function renderPipeline(pipeline) {
 // ---- Campaign tabs ----
 function renderCampaignTabs() {
   const campaigns = ["all", ...new Set(allJobs.map(j => j.campaign))];
-  const isNormal  = !showingAnalytics && !showingCampaigns;
+  const isNormal  = !showingAnalytics && !showingCampaigns && !showingResumes;
   const box = document.getElementById("campaign-tabs");
-  box.innerHTML = campaigns.map(c =>
+  const jobTabs = campaigns.map(c =>
     `<div class="tab ${activeCampaign===c && isNormal?'active':''}" onclick="filterCampaign('${c}')">
       ${c === "all" ? "All Campaigns" : c}</div>`
-  ).join("") +
-  `<div class="tab${showingAnalytics?' analytics-tab':''}" onclick="openAnalyticsTab()" style="margin-left:12px">
-    📊 Analytics</div>` +
-  `<div class="tab${showingCampaigns?' campaigns-tab':''}" onclick="openCampaignsTab()" style="margin-left:6px">
-    ⚙ Campaigns</div>` +
-  `<div class="tab${showingResumes?' resumes-tab':''}" onclick="openResumesTab()" style="margin-left:6px">
-    📄 Resumes</div>`;
+  ).join("");
+  const specialTabs =
+    `<div class="tab${showingAnalytics?' analytics-tab':''}" onclick="openAnalyticsTab()" style="margin-left:12px">📊 Analytics</div>` +
+    `<div class="tab${showingCampaigns?' campaigns-tab':''}" onclick="openCampaignsTab()" style="margin-left:6px">⚙ Campaigns</div>` +
+    `<div class="tab${showingResumes?' resumes-tab':''}" onclick="openResumesTab()" style="margin-left:6px">📄 Resumes</div>`;
+  box.innerHTML = jobTabs + specialTabs;
 }
 
 // ---- Table ----
@@ -1661,6 +1660,7 @@ async function deleteCampaign(name) {
     document.getElementById("count-label").style.display    = "none";
   }
 })();
+renderCampaignTabs();
 loadData();
 setInterval(loadData, 60000);  // auto-refresh every minute
 document.addEventListener("keydown", e => {
