@@ -332,6 +332,46 @@ a:hover { text-decoration: underline; }
 .ce-del-btn { background: none; color: #c0392b; border: 1px solid #e0b0b0; padding: 8px 14px;
               border-radius: 6px; font-size: 13px; cursor: pointer; }
 .ce-del-btn:hover { background: #fdf0ef; border-color: #c0392b; }
+
+/* Resume manager */
+.tab.resumes-tab { background: #8e44ad; color: #fff; border-color: #8e44ad; }
+.tab.resumes-tab:hover { background: #7d3c98; border-color: #7d3c98; }
+.rm-hdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.rm-hdr h2 { font-size: 18px; font-weight: 700; color: #2c3e50; }
+.rm-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 800px) { .rm-layout { grid-template-columns: 1fr; } }
+.rm-card { background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.08); padding: 20px 24px; }
+.rm-card h3 { font-size: 14px; font-weight: 700; color: #2c3e50; margin-bottom: 16px; }
+.rm-drop { border: 2px dashed #bdc3c7; border-radius: 8px; padding: 32px 20px;
+           text-align: center; cursor: pointer; transition: all .2s; margin-bottom: 14px; }
+.rm-drop:hover, .rm-drop.dragover { border-color: #8e44ad; background: #f9f0ff; }
+.rm-drop p { color: #888; font-size: 13px; margin-top: 6px; }
+.rm-drop strong { color: #555; font-size: 14px; }
+.rm-drop input[type=file] { display: none; }
+.rm-fname { width: 100%; padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px;
+            font-size: 13px; margin-bottom: 10px; }
+.rm-fname:focus { outline: none; border-color: #8e44ad; }
+.rm-preview { background: #f8f8f8; border: 1px solid #eee; border-radius: 6px;
+              padding: 10px 12px; font-size: 11px; color: #666; max-height: 100px;
+              overflow-y: auto; white-space: pre-wrap; margin-bottom: 10px; display: none; }
+.rm-upload-btn { width: 100%; background: #8e44ad; color: #fff; border: none;
+                 padding: 10px; border-radius: 6px; font-size: 13px; font-weight: 600;
+                 cursor: pointer; }
+.rm-upload-btn:hover { background: #7d3c98; }
+.rm-upload-btn:disabled { background: #bbb; cursor: not-allowed; }
+.rm-list { display: flex; flex-direction: column; gap: 10px; }
+.rm-item { display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+           border: 1px solid #eee; border-radius: 8px; background: #fafafa; }
+.rm-item-icon { font-size: 22px; flex-shrink: 0; }
+.rm-item-info { flex: 1; min-width: 0; }
+.rm-item-name { font-size: 13px; font-weight: 600; color: #2c3e50;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rm-item-meta { font-size: 11px; color: #999; margin-top: 2px; }
+.rm-item-del { background: none; border: 1px solid #e0b0b0; color: #c0392b;
+               border-radius: 5px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+               flex-shrink: 0; }
+.rm-item-del:hover { background: #fdf0ef; }
+.rm-empty { color: #aaa; font-size: 13px; text-align: center; padding: 24px 0; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
@@ -443,6 +483,33 @@ a:hover { text-decoration: underline; }
     </div>
   </div>
 
+  <!-- Resume Manager Panel -->
+  <div id="resumes-panel" style="display:none">
+    <div class="rm-hdr">
+      <h2>Resume Manager</h2>
+    </div>
+    <div class="rm-layout">
+      <div class="rm-card">
+        <h3>Upload Resume</h3>
+        <div class="rm-drop" id="rm-drop" onclick="document.getElementById('rm-file-input').click()"
+             ondragover="rmDragOver(event)" ondragleave="rmDragLeave(event)" ondrop="rmDrop(event)">
+          <input type="file" id="rm-file-input" accept=".pdf,.docx,.txt" onchange="rmFileSelected(event)">
+          <strong>Click to browse or drag &amp; drop</strong>
+          <p>PDF, DOCX, or TXT &mdash; max 4 MB</p>
+        </div>
+        <input class="rm-fname" id="rm-name" placeholder="Resume name (e.g. Senior Technical Recruiter)">
+        <div class="rm-preview" id="rm-preview"></div>
+        <button class="rm-upload-btn" id="rm-upload-btn" onclick="rmUpload()" disabled>Upload Resume</button>
+      </div>
+      <div class="rm-card">
+        <h3>Your Resumes</h3>
+        <div id="rm-list">
+          <div class="rm-empty">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Campaign Editor Panel -->
   <div id="campaigns-panel" style="display:none">
     <div class="ce-hdr">
@@ -516,6 +583,7 @@ let activeStatus      = "all";
 let activeCampaign    = "all";
 let showingAnalytics  = false;
 let showingCampaigns  = false;
+let showingResumes    = false;
 let analyticsCharts   = {};
 let currentView       = localStorage.getItem("jobTrackerView") || "table";
 let sortableInstances = [];
@@ -523,7 +591,7 @@ let campaignsData     = [];
 
 // ---- Load data ----
 async function loadData() {
-  if (showingAnalytics || showingCampaigns) return;
+  if (showingAnalytics || showingCampaigns || showingResumes) return;
   const res  = await fetch("/api/jobs");
   const data = await res.json();
   allJobs = data.jobs;
@@ -610,7 +678,9 @@ function renderCampaignTabs() {
   `<div class="tab${showingAnalytics?' analytics-tab':''}" onclick="openAnalyticsTab()" style="margin-left:12px">
     📊 Analytics</div>` +
   `<div class="tab${showingCampaigns?' campaigns-tab':''}" onclick="openCampaignsTab()" style="margin-left:6px">
-    ⚙ Campaigns</div>`;
+    ⚙ Campaigns</div>` +
+  `<div class="tab${showingResumes?' resumes-tab':''}" onclick="openResumesTab()" style="margin-left:6px">
+    📄 Resumes</div>`;
 }
 
 // ---- Table ----
@@ -789,6 +859,7 @@ function filterStatus(s) {
 function filterCampaign(c) {
   if (showingAnalytics) closeAnalytics();
   if (showingCampaigns) closeCampaigns();
+  if (showingResumes)   closeResumes();
   activeCampaign = c;
   renderCampaignTabs();
   if (currentView === "board") renderBoard();
@@ -1030,6 +1101,7 @@ function updateKanbanCounts() {
 // ---- Analytics ----
 async function openAnalyticsTab() {
   if (showingCampaigns) closeCampaigns();
+  if (showingResumes)   closeResumes();
   showingAnalytics = true;
   document.getElementById("job-table-wrap").style.display  = "none";
   document.getElementById("kanban-wrap").style.display     = "none";
@@ -1218,6 +1290,148 @@ function downloadCoverLetter() {
 
 function regenerateCoverLetter() { fetchCoverLetter(); }
 
+// ---- Resume Manager ----
+let rmFile = null;
+
+function rmShowPanels(show) {
+  ["job-table-wrap","kanban-wrap","analytics-panel","campaigns-panel"].forEach(id => {
+    document.getElementById(id).style.display = "none";
+  });
+  document.getElementById("search").style.display      = "none";
+  document.getElementById("count-label").style.display = "none";
+  document.getElementById("resumes-panel").style.display = show ? "block" : "none";
+}
+
+function rmRestoreView() {
+  document.getElementById("resumes-panel").style.display = "none";
+  if (currentView === "board") {
+    document.getElementById("kanban-wrap").style.display    = "block";
+    document.getElementById("search").style.display         = "none";
+    document.getElementById("count-label").style.display    = "none";
+    renderBoard();
+  } else {
+    document.getElementById("job-table-wrap").style.display = "block";
+    document.getElementById("search").style.display         = "";
+    document.getElementById("count-label").style.display    = "";
+    renderTable();
+  }
+}
+
+async function openResumesTab() {
+  if (showingAnalytics) closeAnalytics();
+  if (showingCampaigns) closeCampaigns();
+  showingResumes = true;
+  rmShowPanels(true);
+  renderCampaignTabs();
+  await rmLoadList();
+}
+
+function closeResumes() {
+  showingResumes = false;
+  rmRestoreView();
+  renderCampaignTabs();
+}
+
+async function rmLoadList() {
+  try {
+    const res  = await fetch("/api/resumes");
+    const data = await res.json();
+    const list = document.getElementById("rm-list");
+    if (!data.resumes || !data.resumes.length) {
+      list.innerHTML = '<div class="rm-empty">No resumes uploaded yet.</div>';
+      return;
+    }
+    list.innerHTML = data.resumes.map(r => `
+      <div class="rm-item">
+        <span class="rm-item-icon">📄</span>
+        <div class="rm-item-info">
+          <div class="rm-item-name">${r.name}</div>
+          <div class="rm-item-meta">${r.char_count.toLocaleString()} characters &middot; ${r.uploaded_at ? r.uploaded_at.slice(0,10) : ""}</div>
+        </div>
+        <button class="rm-item-del" onclick="rmDelete('${r.name.replace(/'/g,"\\'")}')">Delete</button>
+      </div>`).join("");
+  } catch(err) {
+    document.getElementById("rm-list").innerHTML =
+      '<div class="rm-empty" style="color:#e74c3c">Failed to load resumes.</div>';
+  }
+}
+
+function rmDragOver(e) {
+  e.preventDefault();
+  document.getElementById("rm-drop").classList.add("dragover");
+}
+function rmDragLeave(e) {
+  document.getElementById("rm-drop").classList.remove("dragover");
+}
+function rmDrop(e) {
+  e.preventDefault();
+  document.getElementById("rm-drop").classList.remove("dragover");
+  const f = e.dataTransfer.files[0];
+  if (f) rmSetFile(f);
+}
+function rmFileSelected(e) {
+  const f = e.target.files[0];
+  if (f) rmSetFile(f);
+}
+
+function rmSetFile(f) {
+  rmFile = f;
+  const name = f.name.replace(/\.(pdf|docx|txt)$/i, "");
+  document.getElementById("rm-name").value = name;
+  const preview = document.getElementById("rm-preview");
+  preview.style.display = "block";
+  preview.textContent   = f.name + " (" + (f.size / 1024).toFixed(1) + " KB) — ready to upload";
+  document.getElementById("rm-upload-btn").disabled = false;
+}
+
+async function rmUpload() {
+  if (!rmFile) return;
+  const name = document.getElementById("rm-name").value.trim();
+  if (!name) { showToast("Please enter a resume name", "#e74c3c"); return; }
+
+  const btn = document.getElementById("rm-upload-btn");
+  btn.disabled = true;
+  btn.textContent = "Uploading…";
+
+  const form = new FormData();
+  form.append("file", rmFile);
+  form.append("name", name);
+
+  try {
+    const res  = await fetch("/api/resumes/upload", { method: "POST", body: form });
+    const data = await res.json();
+    if (data.ok) {
+      showToast("Resume uploaded: " + name);
+      rmFile = null;
+      document.getElementById("rm-file-input").value = "";
+      document.getElementById("rm-name").value        = "";
+      document.getElementById("rm-preview").style.display = "none";
+      btn.textContent = "Upload Resume";
+      await rmLoadList();
+    } else {
+      showToast("Upload failed: " + (data.error || "unknown error"), "#e74c3c");
+      btn.disabled = false;
+      btn.textContent = "Upload Resume";
+    }
+  } catch(err) {
+    showToast("Network error. Please try again.", "#e74c3c");
+    btn.disabled = false;
+    btn.textContent = "Upload Resume";
+  }
+}
+
+async function rmDelete(name) {
+  if (!confirm(`Delete resume "${name}"?`)) return;
+  const res  = await fetch("/api/resumes/" + encodeURIComponent(name), { method: "DELETE" });
+  const data = await res.json();
+  if (data.ok) {
+    showToast("Resume deleted", "#c0392b");
+    await rmLoadList();
+  } else {
+    showToast("Delete failed", "#e74c3c");
+  }
+}
+
 // ---- Campaign Editor ----
 const CE_FILTER_FIELDS = [
   { key: "title_must_include",       label: "Title Must Include" },
@@ -1330,6 +1544,7 @@ function ceCollect(idx) {
 
 async function openCampaignsTab() {
   if (showingAnalytics) closeAnalytics();
+  if (showingResumes)   closeResumes();
   showingCampaigns = true;
   document.getElementById("job-table-wrap").style.display  = "none";
   document.getElementById("kanban-wrap").style.display     = "none";
@@ -1452,6 +1667,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     closeCLModal();
     if (showingCampaigns) closeCampaigns();
+    if (showingResumes)   closeResumes();
   }
 });
 </script>
@@ -1684,6 +1900,98 @@ def api_update_status():
         cur.close(); conn.close()
         return jsonify({"ok": True})
     return jsonify({"ok": False}), 400
+
+
+@app.route("/api/resumes", methods=["GET"])
+def api_get_resumes():
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name, LENGTH(COALESCE(content,'')), uploaded_at "
+            "FROM resumes ORDER BY uploaded_at DESC"
+        )
+        rows = cur.fetchall()
+        cur.close()
+        resumes = [
+            {"name": r[0], "char_count": r[1] or 0,
+             "uploaded_at": r[2].isoformat() if r[2] else None}
+            for r in rows
+        ]
+        return jsonify({"resumes": resumes})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/api/resumes/upload", methods=["POST"])
+def api_upload_resume():
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    f    = request.files["file"]
+    name = (request.form.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name required"}), 400
+
+    filename = f.filename or ""
+    ext      = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+    try:
+        raw = f.read()
+        if ext == "pdf":
+            import io
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(raw))
+            text   = "\n".join(
+                page.extract_text() or "" for page in reader.pages
+            ).strip()
+            if not text:
+                return jsonify({"error": "Could not extract text from PDF. "
+                                         "Scanned/image PDFs are not supported."}), 422
+        elif ext == "docx":
+            import io
+            from docx import Document
+            doc  = Document(io.BytesIO(raw))
+            text = "\n".join(p.text for p in doc.paragraphs).strip()
+            if not text:
+                return jsonify({"error": "Could not extract text from DOCX."}), 422
+        elif ext == "txt":
+            text = raw.decode("utf-8", errors="replace").strip()
+        else:
+            return jsonify({"error": "Unsupported file type. Use PDF, DOCX, or TXT."}), 400
+
+        conn = get_conn()
+        cur  = conn.cursor()
+        cur.execute(
+            """INSERT INTO resumes (name, content)
+               VALUES (%s, %s)
+               ON CONFLICT (name) DO UPDATE
+                 SET content = EXCLUDED.content, uploaded_at = NOW()""",
+            (name, text),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({"ok": True, "char_count": len(text)})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+
+
+@app.route("/api/resumes/<name>", methods=["DELETE"])
+def api_delete_resume(name):
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM resumes WHERE name = %s", (name,))
+        conn.commit()
+        cur.close()
+        return jsonify({"ok": True})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+    finally:
+        conn.close()
 
 
 def _ensure_campaigns_table(conn):
