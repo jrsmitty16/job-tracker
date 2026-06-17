@@ -2285,7 +2285,13 @@ def api_get_resume_file(name):
             return jsonify({"error": "File not found"}), 404
         file_data = bytes(row[0])
         mime_type = row[1] or "application/octet-stream"
-        safe_name = row[2].replace('"', '_')
+        ext_map = {
+            "application/pdf": ".pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+            "text/plain": ".txt",
+        }
+        ext = ext_map.get(mime_type, "")
+        safe_name = row[2].replace('"', '_') + ext
         disposition = "attachment" if request.args.get("dl") else "inline"
         return Response(
             file_data,
