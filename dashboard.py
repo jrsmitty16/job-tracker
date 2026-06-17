@@ -378,6 +378,25 @@ a:hover { text-decoration: underline; }
                flex-shrink: 0; }
 .rm-item-del:hover { background: #fdf0ef; }
 .rm-empty { color: #aaa; font-size: 13px; text-align: center; padding: 24px 0; }
+.rm-item-view { background: none; border: 1px solid #aed6f1; color: #2980b9;
+                border-radius: 5px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+                flex-shrink: 0; }
+.rm-item-view:hover { background: #eaf2ff; }
+.rv-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55);
+            z-index:1000; align-items:center; justify-content:center; }
+.rv-modal.open { display:flex; }
+.rv-box { background:#fff; border-radius:12px; width:720px; max-width:94vw;
+          max-height:88vh; display:flex; flex-direction:column;
+          box-shadow:0 8px 40px rgba(0,0,0,.25); }
+.rv-hdr { padding:18px 24px 14px; border-bottom:1px solid #eee;
+          display:flex; align-items:center; justify-content:space-between; }
+.rv-hdr h3 { font-size:16px; font-weight:700; color:#2c3e50; }
+.rv-close { background:none; border:none; font-size:20px; cursor:pointer;
+            color:#aaa; line-height:1; padding:2px 6px; border-radius:4px; }
+.rv-close:hover { background:#f5f5f5; color:#555; }
+.rv-body { flex:1; overflow-y:auto; padding:20px 24px; }
+.rv-text { font-size:13px; line-height:1.8; white-space:pre-wrap; color:#333;
+           font-family: monospace; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
@@ -550,6 +569,19 @@ a:hover { text-decoration: underline; }
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- Resume View Modal -->
+<div class="rv-modal" id="rv-modal" onclick="if(event.target===this)closeRvModal()">
+  <div class="rv-box">
+    <div class="rv-hdr">
+      <h3 id="rv-title">Resume</h3>
+      <button class="rv-close" onclick="closeRvModal()">&#x2715;</button>
+    </div>
+    <div class="rv-body">
+      <div class="rv-text" id="rv-text"></div>
+    </div>
+  </div>
+</div>
 
 <!-- Cover Letter Modal -->
 <div class="cl-modal" id="cl-modal" onclick="if(event.target===this)closeCLModal()">
@@ -1354,7 +1386,8 @@ async function rmLoadList() {
           <div class="rm-item-name">${r.name}</div>
           <div class="rm-item-meta">${r.char_count.toLocaleString()} characters &middot; ${r.uploaded_at ? r.uploaded_at.slice(0,10) : ""}</div>
         </div>
-        <button class="rm-item-del" onclick="rmDelete('${r.name.replace(/'/g,"\\'")}')">Delete</button>
+        <button class="rm-item-view" onclick="rvOpen('${r.name.replace(/'/g,"\\'")}')">View</button>
+        <button class="rm-item-del"  onclick="rmDelete('${r.name.replace(/'/g,"\\'")}')">Delete</button>
       </div>`).join("");
   } catch(err) {
     document.getElementById("rm-list").innerHTML =
@@ -1424,6 +1457,25 @@ async function rmUpload() {
     btn.disabled = false;
     btn.textContent = "Upload Resume";
   }
+}
+
+async function rvOpen(name) {
+  document.getElementById("rv-title").textContent = name;
+  document.getElementById("rv-text").textContent  = "Loading…";
+  document.getElementById("rv-modal").classList.add("open");
+  document.body.style.overflow = "hidden";
+  try {
+    const res  = await fetch("/api/resumes/" + encodeURIComponent(name));
+    const data = await res.json();
+    document.getElementById("rv-text").textContent = data.content || "(no content)";
+  } catch(err) {
+    document.getElementById("rv-text").textContent = "Failed to load resume.";
+  }
+}
+
+function closeRvModal() {
+  document.getElementById("rv-modal").classList.remove("open");
+  document.body.style.overflow = "";
 }
 
 async function rmDelete(name) {
@@ -1705,6 +1757,7 @@ setInterval(loadData, 60000);  // auto-refresh every minute
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     closeCLModal();
+    closeRvModal();
     if (showingCampaigns) closeCampaigns();
     if (showingResumes)   closeResumes();
   }
@@ -2073,6 +2126,23 @@ def api_upload_resume():
         return jsonify({"ok": True, "char_count": len(text)})
     except Exception as ex:
         return jsonify({"error": str(ex)}), 500
+
+
+@app.route("/api/resumes/<name>", methods=["GET"])
+def api_get_resume(name):
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT name, content FROM resumes WHERE name = %s", (name,))
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            return jsonify({"error": "Not found"}), 404
+        return jsonify({"name": row[0], "content": row[1] or ""})
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+    finally:
+        conn.close()
 
 
 @app.route("/api/resumes/<name>", methods=["DELETE"])
