@@ -1562,7 +1562,7 @@ async function rvOpen(name, mimeType) {
 function rvDownload() {
   if (!rvCurrentName) return;
   const a = document.createElement("a");
-  a.href     = "/api/resumes/" + encodeURIComponent(rvCurrentName) + "/file";
+  a.href     = "/api/resumes/" + encodeURIComponent(rvCurrentName) + "/file?dl=1";
   a.download = rvCurrentName;
   a.click();
 }
@@ -2264,10 +2264,11 @@ def api_get_resume_file(name):
         file_data = bytes(row[0])
         mime_type = row[1] or "application/octet-stream"
         safe_name = row[2].replace('"', '_')
+        disposition = "attachment" if request.args.get("dl") else "inline"
         return Response(
             file_data,
             mimetype=mime_type,
-            headers={"Content-Disposition": f'attachment; filename="{safe_name}"'}
+            headers={"Content-Disposition": f'{disposition}; filename="{safe_name}"'}
         )
     except Exception as ex:
         return jsonify({"error": str(ex)}), 500
