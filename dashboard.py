@@ -332,6 +332,12 @@ a:hover { text-decoration: underline; }
 .ce-del-btn { background: none; color: #c0392b; border: 1px solid #e0b0b0; padding: 8px 14px;
               border-radius: 6px; font-size: 13px; cursor: pointer; }
 .ce-del-btn:hover { background: #fdf0ef; border-color: #c0392b; }
+.ce-resume-checks { display: flex; flex-wrap: wrap; gap: 8px; min-height: 24px; }
+.ce-resume-check { display: flex; align-items: center; gap: 5px; font-size: 12px;
+                   background: #f8f0ff; border: 1px solid #d7b8f3; border-radius: 6px;
+                   padding: 4px 10px; cursor: pointer; user-select: none; }
+.ce-resume-check input { cursor: pointer; accent-color: #8e44ad; }
+.ce-resume-none { font-size: 12px; color: #aaa; font-style: italic; }
 
 /* Resume manager */
 .tab.resumes-tab { background: #8e44ad; color: #fff; border-color: #8e44ad; }
@@ -588,6 +594,7 @@ let analyticsCharts   = {};
 let currentView       = localStorage.getItem("jobTrackerView") || "table";
 let sortableInstances = [];
 let campaignsData     = [];
+let availableResumes  = [];
 
 // ---- Load data ----
 async function loadData() {
@@ -1452,6 +1459,18 @@ function ceChipHtml(idx, field, value) {
     }<button class="ce-chip-x" onclick="this.closest('.ce-chip').remove()" title="Remove">&times;</button></span>`;
 }
 
+function ceResumeChecks(idx, assigned) {
+  if (!availableResumes.length)
+    return '<div class="ce-resume-none">No resumes uploaded yet — add some in the Resumes tab.</div>';
+  return availableResumes.map(name => {
+    const checked = (assigned || []).includes(name) ? "checked" : "";
+    const safe    = ceEsc(name);
+    return `<label class="ce-resume-check">
+      <input type="checkbox" value="${safe}" ${checked}> ${safe}
+    </label>`;
+  }).join("");
+}
+
 function buildCampaignCard(c, idx) {
   const filterSections = CE_FILTER_FIELDS.map(f => `
     <div class="ce-section">
@@ -1477,6 +1496,10 @@ function buildCampaignCard(c, idx) {
         onkeydown="ceAddChip(event,${idx},'queries')">
     </div>
     ${filterSections}
+    <div class="ce-section">
+      <div class="ce-slabel">Resumes for This Campaign <span style="font-weight:400;color:#aaa">(only matched on jobs scoring 3+)</span></div>
+      <div class="ce-resume-checks" id="resumes-${idx}">${ceResumeChecks(idx, c.resume_names)}</div>
+    </div>
     <div class="ce-actions">
       <button class="ce-save-btn" onclick="saveCampaign(${idx},'${ceEsc(c.name)}')">Save Campaign</button>
     </div>
@@ -1503,6 +1526,10 @@ function buildNewCampaignCard(idx) {
         onkeydown="ceAddChip(event,${idx},'queries')">
     </div>
     ${filterSections}
+    <div class="ce-section">
+      <div class="ce-slabel">Resumes for This Campaign <span style="font-weight:400;color:#aaa">(only matched on jobs scoring 3+)</span></div>
+      <div class="ce-resume-checks" id="resumes-${idx}">${ceResumeChecks(idx, [])}</div>
+    </div>
     <div class="ce-actions">
       <button class="ce-save-btn" onclick="saveNewCampaign(${idx})">Create Campaign</button>
     </div>
@@ -1538,7 +1565,11 @@ function ceCollect(idx) {
     const vals = ceGetChips(idx, f.key);
     if (vals.length) filters[f.key] = vals;
   });
-  return { queries, filters };
+  const resumeEl      = document.getElementById(`resumes-${idx}`);
+  const resume_names  = resumeEl
+    ? Array.from(resumeEl.querySelectorAll("input[type=checkbox]:checked")).map(cb => cb.value)
+    : [];
+  return { queries, filters, resume_names };
 }
 
 async function openCampaignsTab() {
@@ -1552,7 +1583,15 @@ async function openCampaignsTab() {
   document.getElementById("analytics-panel").style.display = "none";
   document.getElementById("campaigns-panel").style.display = "block";
   renderCampaignTabs();
-  await loadCampaigns();
+  await Promise.all([loadCampaigns(), loadResumesForCampaigns()]);
+}
+
+async function loadResumesForCampaigns() {
+  try {
+    const res  = await fetch("/api/resumes");
+    const data = await res.json();
+    availableResumes = (data.resumes || []).map(r => r.name);
+  } catch(_) { availableResumes = []; }
 }
 
 function closeCampaigns() {
@@ -2055,14 +2094,16 @@ def _ensure_campaigns_table(conn):
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS campaigns (
-            id         SERIAL PRIMARY KEY,
-            name       TEXT UNIQUE NOT NULL,
-            queries    JSONB NOT NULL DEFAULT '[]',
-            filters    JSONB NOT NULL DEFAULT '{}',
-            enabled    BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMPTZ DEFAULT NOW()
+            id           SERIAL PRIMARY KEY,
+            name         TEXT UNIQUE NOT NULL,
+            queries      JSONB NOT NULL DEFAULT '[]',
+            filters      JSONB NOT NULL DEFAULT '{}',
+            resume_names JSONB NOT NULL DEFAULT '[]',
+            enabled      BOOLEAN DEFAULT TRUE,
+            created_at   TIMESTAMPTZ DEFAULT NOW()
         )
     """)
+    cur.execute("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS resume_names JSONB NOT NULL DEFAULT '[]'")
     conn.commit()
     cur.close()
 
@@ -2073,11 +2114,12 @@ def api_get_campaigns():
     try:
         _ensure_campaigns_table(conn)
         cur = conn.cursor()
-        cur.execute("SELECT name, queries, filters, enabled FROM campaigns ORDER BY id")
+        cur.execute("SELECT name, queries, filters, resume_names, enabled FROM campaigns ORDER BY id")
         rows = cur.fetchall()
         cur.close()
         campaigns = [
-            {"name": r[0], "queries": r[1] or [], "filters": r[2] or {}, "enabled": r[3]}
+            {"name": r[0], "queries": r[1] or [], "filters": r[2] or {},
+             "resume_names": r[3] or [], "enabled": r[4]}
             for r in rows
         ]
         return jsonify({"campaigns": campaigns})
@@ -2089,10 +2131,11 @@ def api_get_campaigns():
 
 @app.route("/api/campaigns", methods=["POST"])
 def api_save_campaign():
-    data    = request.get_json()
-    name    = (data.get("name") or "").strip()
-    queries = data.get("queries", [])
-    filters = data.get("filters", {})
+    data         = request.get_json()
+    name         = (data.get("name") or "").strip()
+    queries      = data.get("queries", [])
+    filters      = data.get("filters", {})
+    resume_names = data.get("resume_names", [])
     if not name:
         return jsonify({"error": "name required"}), 400
     if not isinstance(queries, list):
@@ -2102,12 +2145,13 @@ def api_save_campaign():
         _ensure_campaigns_table(conn)
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO campaigns (name, queries, filters)
-               VALUES (%s, %s::jsonb, %s::jsonb)
+            """INSERT INTO campaigns (name, queries, filters, resume_names)
+               VALUES (%s, %s::jsonb, %s::jsonb, %s::jsonb)
                ON CONFLICT (name) DO UPDATE
-                 SET queries = EXCLUDED.queries,
-                     filters = EXCLUDED.filters""",
-            (name, json.dumps(queries), json.dumps(filters)),
+                 SET queries      = EXCLUDED.queries,
+                     filters      = EXCLUDED.filters,
+                     resume_names = EXCLUDED.resume_names""",
+            (name, json.dumps(queries), json.dumps(filters), json.dumps(resume_names)),
         )
         conn.commit()
         cur.close()

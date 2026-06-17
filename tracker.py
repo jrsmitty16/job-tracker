@@ -139,14 +139,16 @@ def init_db():
     # Campaigns table (edited via dashboard)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS campaigns (
-            id         SERIAL PRIMARY KEY,
-            name       TEXT UNIQUE NOT NULL,
-            queries    JSONB NOT NULL DEFAULT '[]',
-            filters    JSONB NOT NULL DEFAULT '{}',
-            enabled    BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMPTZ DEFAULT NOW()
+            id           SERIAL PRIMARY KEY,
+            name         TEXT UNIQUE NOT NULL,
+            queries      JSONB NOT NULL DEFAULT '[]',
+            filters      JSONB NOT NULL DEFAULT '{}',
+            resume_names JSONB NOT NULL DEFAULT '[]',
+            enabled      BOOLEAN DEFAULT TRUE,
+            created_at   TIMESTAMPTZ DEFAULT NOW()
         )
     """)
+    cur.execute("ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS resume_names JSONB NOT NULL DEFAULT '[]'")
     # Safe migration: add columns introduced after the initial schema
     for _ddl in [
         "ALTER TABLE seen_jobs ADD COLUMN IF NOT EXISTS nudge TEXT",
@@ -270,13 +272,17 @@ def score_job_with_llm(title: str, company: str, description: str = "") -> tuple
 # Resume Matching — picks best resume for each job via Anthropic
 # ---------------------------------------------------------------------------
 
-def match_resume_to_job(conn, title: str, company: str, description: str = "") -> tuple[str | None, int, str]:
+def match_resume_to_job(conn, title: str, company: str, description: str = "",
+                        allowed_names: list | None = None) -> tuple[str | None, int, str]:
     """Compare all resumes against a job and return (best_resume_name, score, rationale)."""
     try:
         cur = conn.cursor()
         cur.execute("SELECT name, content FROM resumes ORDER BY id")
         resumes = cur.fetchall()
         cur.close()
+
+        if allowed_names:
+            resumes = [(n, c) for n, c in resumes if n in allowed_names]
 
         if not resumes:
             return None, 0, ""
@@ -1382,17 +1388,18 @@ def load_campaigns_from_db(conn) -> dict:
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT name, queries, filters FROM campaigns WHERE enabled = TRUE ORDER BY id"
+            "SELECT name, queries, filters, resume_names FROM campaigns WHERE enabled = TRUE ORDER BY id"
         )
         rows = cur.fetchall()
         cur.close()
         if not rows:
             return {}
         result = {}
-        for name, queries, filters in rows:
+        for name, queries, filters, resume_names in rows:
             result[name] = {
-                "queries": queries if isinstance(queries, list) else [],
-                "filters": filters if isinstance(filters, dict) else {},
+                "queries":      queries      if isinstance(queries, list) else [],
+                "filters":      filters      if isinstance(filters, dict) else {},
+                "resume_names": resume_names if isinstance(resume_names, list) else [],
             }
         return result
     except Exception as exc:
@@ -1448,12 +1455,17 @@ def run():
                 job.get("company", ""),
                 job.get("description", ""),
             )
-            best_resume, resume_score, resume_rationale = match_resume_to_job(
-                conn,
-                job["title"],
-                job.get("company", ""),
-                job.get("description", ""),
-            )
+            campaign_resumes = campaign_cfg.get("resume_names") or None
+            if score >= 3:
+                best_resume, resume_score, resume_rationale = match_resume_to_job(
+                    conn,
+                    job["title"],
+                    job.get("company", ""),
+                    job.get("description", ""),
+                    allowed_names=campaign_resumes,
+                )
+            else:
+                best_resume, resume_score, resume_rationale = None, 0, ""
             funding_stage, headcount, recent_news, company_summary = enrich_company(
                 job.get("company", ""),
                 job["title"],
