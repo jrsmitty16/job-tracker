@@ -407,6 +407,20 @@ a:hover { text-decoration: underline; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
+<script>
+window.onerror=function(msg,src,line,col,err){
+  var d=document.getElementById("js-error-banner");
+  if(!d){d=document.createElement("div");d.id="js-error-banner";
+    d.style.cssText="position:fixed;top:0;left:0;right:0;background:#c0392b;color:#fff;padding:10px 16px;font-size:13px;z-index:9999;font-family:monospace;";
+    document.body.appendChild(d);}
+  d.textContent="JS Error line "+line+": "+msg;return false;};
+window.addEventListener("unhandledrejection",function(e){
+  var d=document.getElementById("js-error-banner");
+  if(!d){d=document.createElement("div");d.id="js-error-banner";
+    d.style.cssText="position:fixed;top:0;left:0;right:0;background:#e67e22;color:#fff;padding:10px 16px;font-size:13px;z-index:9999;font-family:monospace;";
+    document.body.appendChild(d);}
+  d.textContent="Promise error: "+(e.reason&&e.reason.message?e.reason.message:String(e.reason));});
+</script>
 </head>
 <body>
 
@@ -1833,14 +1847,6 @@ async function deleteCampaign(name) {
     document.getElementById("count-label").style.display    = "none";
   }
 })();
-window.onerror = function(msg, src, line, col, err) {
-  var d = document.getElementById("js-error-banner");
-  if (!d) { d = document.createElement("div"); d.id="js-error-banner";
-    d.style.cssText="position:fixed;top:0;left:0;right:0;background:#c0392b;color:#fff;padding:10px 16px;font-size:13px;z-index:9999;";
-    document.body.prepend(d); }
-  d.textContent = "JS error (line " + line + "): " + msg;
-  return false;
-};
 renderCampaignTabs();
 loadData();
 setInterval(loadData, 60000);  // auto-refresh every minute
