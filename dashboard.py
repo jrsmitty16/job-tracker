@@ -407,7 +407,6 @@ a:hover { text-decoration: underline; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/docx-preview@0.3.5/dist/docx-preview.min.js"></script>
 </head>
 <body>
 
@@ -1501,9 +1500,19 @@ async function rvOpen(name, mimeType) {
       body.innerHTML = `<iframe class="rv-iframe" src="${fileUrl}"></iframe>`;
 
     } else if (mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
-      // Render DOCX with docx-preview
+      // Render DOCX with docx-preview (lazy-loaded)
       body.style.padding = "20px 24px";
       body.style.overflow = "auto";
+      // Load docx-preview if not already loaded
+      if (typeof docx === "undefined") {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = "https://cdn.jsdelivr.net/npm/docx-preview@0.3.5/dist/docx-preview.min.js";
+          s.onload = resolve;
+          s.onerror = reject;
+          document.head.appendChild(s);
+        });
+      }
       const resp = await fetch(fileUrl);
       if (!resp.ok) throw new Error("Failed to fetch file");
       const buf  = await resp.arrayBuffer();
@@ -1514,7 +1523,7 @@ async function rvOpen(name, mimeType) {
       if (typeof docx !== "undefined" && docx.renderAsync) {
         await docx.renderAsync(buf, wrap, null, { className: "docx", inWrapper: false });
       } else {
-        wrap.textContent = "(docx-preview library not loaded — try refreshing)";
+        wrap.textContent = "(docx-preview library unavailable — use Download instead)";
       }
 
     } else {
