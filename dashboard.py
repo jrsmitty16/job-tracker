@@ -397,9 +397,17 @@ a:hover { text-decoration: underline; }
 .rv-body { flex:1; overflow-y:auto; padding:20px 24px; }
 .rv-text { font-size:13px; line-height:1.8; white-space:pre-wrap; color:#333;
            font-family: monospace; }
+.rv-hdr-actions { display:flex; gap:8px; align-items:center; }
+.rv-dl-btn { background:#27ae60; color:#fff; border:none; padding:6px 14px;
+             border-radius:6px; font-size:13px; font-weight:600; cursor:pointer; }
+.rv-dl-btn:hover { background:#219a52; }
+.rv-iframe { width:100%; height:100%; border:none; display:block; min-height:520px; }
+.rv-docx-wrap { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; }
+.rv-docx-wrap section.docx { box-shadow:none !important; margin:0 auto !important; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/docx-preview@0.3.5/dist/docx-preview.min.js"></script>
 </head>
 <body>
 
@@ -575,10 +583,12 @@ a:hover { text-decoration: underline; }
   <div class="rv-box">
     <div class="rv-hdr">
       <h3 id="rv-title">Resume</h3>
-      <button class="rv-close" onclick="closeRvModal()">&#x2715;</button>
+      <div class="rv-hdr-actions">
+        <button class="rv-dl-btn" id="rv-dl-btn" onclick="rvDownload()">&#x2B07; Download</button>
+        <button class="rv-close" onclick="closeRvModal()">&#x2715;</button>
+      </div>
     </div>
-    <div class="rv-body">
-      <div class="rv-text" id="rv-text"></div>
+    <div class="rv-body" id="rv-body" style="flex:1;overflow-y:auto;padding:20px 24px;">
     </div>
   </div>
 </div>
@@ -1379,16 +1389,20 @@ async function rmLoadList() {
       list.innerHTML = '<div class="rm-empty">No resumes uploaded yet.</div>';
       return;
     }
-    list.innerHTML = data.resumes.map(r => `
+    list.innerHTML = data.resumes.map(r => {
+      const safeName = r.name.replace(/\\/g,"\\\\").replace(/'/g,"\\'");
+      const mt = r.mime_type || "";
+      return `
       <div class="rm-item">
         <span class="rm-item-icon">📄</span>
         <div class="rm-item-info">
           <div class="rm-item-name">${r.name}</div>
           <div class="rm-item-meta">${r.char_count.toLocaleString()} characters &middot; ${r.uploaded_at ? r.uploaded_at.slice(0,10) : ""}</div>
         </div>
-        <button class="rm-item-view" onclick="rvOpen('${r.name.replace(/'/g,"\\'")}')">View</button>
-        <button class="rm-item-del"  onclick="rmDelete('${r.name.replace(/'/g,"\\'")}')">Delete</button>
-      </div>`).join("");
+        <button class="rm-item-view" onclick="rvOpen('${safeName}','${mt}')">View</button>
+        <button class="rm-item-del"  onclick="rmDelete('${safeName}')">Delete</button>
+      </div>`;
+    }).join("");
   } catch(err) {
     document.getElementById("rm-list").innerHTML =
       '<div class="rm-empty" style="color:#e74c3c">Failed to load resumes.</div>';
@@ -1459,23 +1473,75 @@ async function rmUpload() {
   }
 }
 
-async function rvOpen(name) {
+let rvCurrentName = null;
+let rvCurrentMime = null;
+
+async function rvOpen(name, mimeType) {
+  rvCurrentName = name;
+  rvCurrentMime = mimeType || "";
   document.getElementById("rv-title").textContent = name;
-  document.getElementById("rv-text").textContent  = "Loading…";
+  const body = document.getElementById("rv-body");
+  body.innerHTML = '<div style="padding:40px 0;text-align:center;color:#aaa">Loading…</div>';
   document.getElementById("rv-modal").classList.add("open");
   document.body.style.overflow = "hidden";
+
+  const fileUrl = "/api/resumes/" + encodeURIComponent(name) + "/file";
+
   try {
-    const res  = await fetch("/api/resumes/" + encodeURIComponent(name));
-    const data = await res.json();
-    document.getElementById("rv-text").textContent = data.content || "(no content)";
+    if (mimeType === "application/pdf") {
+      // Native browser PDF viewer in iframe
+      body.style.padding = "0";
+      body.style.overflow = "hidden";
+      body.innerHTML = `<iframe class="rv-iframe" src="${fileUrl}"></iframe>`;
+
+    } else if (mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+      // Render DOCX with docx-preview
+      body.style.padding = "20px 24px";
+      body.style.overflow = "auto";
+      const resp = await fetch(fileUrl);
+      if (!resp.ok) throw new Error("Failed to fetch file");
+      const buf  = await resp.arrayBuffer();
+      const wrap = document.createElement("div");
+      wrap.className = "rv-docx-wrap";
+      body.innerHTML = "";
+      body.appendChild(wrap);
+      if (typeof docx !== "undefined" && docx.renderAsync) {
+        await docx.renderAsync(buf, wrap, null, { className: "docx", inWrapper: false });
+      } else {
+        wrap.textContent = "(docx-preview library not loaded — try refreshing)";
+      }
+
+    } else {
+      // Plain text fallback
+      body.style.padding = "20px 24px";
+      body.style.overflow = "auto";
+      const res  = await fetch("/api/resumes/" + encodeURIComponent(name));
+      const data = await res.json();
+      const pre  = document.createElement("div");
+      pre.className   = "rv-text";
+      pre.textContent = data.content || "(no content)";
+      body.innerHTML  = "";
+      body.appendChild(pre);
+    }
   } catch(err) {
-    document.getElementById("rv-text").textContent = "Failed to load resume.";
+    body.innerHTML = `<div style="color:#e74c3c;padding:20px">Failed to load resume: ${err.message}</div>`;
   }
+}
+
+function rvDownload() {
+  if (!rvCurrentName) return;
+  const a = document.createElement("a");
+  a.href     = "/api/resumes/" + encodeURIComponent(rvCurrentName) + "/file";
+  a.download = rvCurrentName;
+  a.click();
 }
 
 function closeRvModal() {
   document.getElementById("rv-modal").classList.remove("open");
+  document.getElementById("rv-body").innerHTML = "";
   document.body.style.overflow = "";
+  rvCurrentName = null;
+  rvCurrentMime = null;
 }
 
 async function rmDelete(name) {
@@ -2029,9 +2095,13 @@ def api_init_db():
                 id          SERIAL PRIMARY KEY,
                 name        TEXT UNIQUE NOT NULL,
                 content     TEXT,
+                file_data   BYTEA,
+                mime_type   TEXT,
                 uploaded_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        cur.execute("ALTER TABLE resumes ADD COLUMN IF NOT EXISTS file_data BYTEA")
+        cur.execute("ALTER TABLE resumes ADD COLUMN IF NOT EXISTS mime_type TEXT")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS campaigns (
                 id         SERIAL PRIMARY KEY,
@@ -2051,20 +2121,30 @@ def api_init_db():
         conn.close()
 
 
+def _ensure_resumes_columns(conn):
+    cur = conn.cursor()
+    cur.execute("ALTER TABLE resumes ADD COLUMN IF NOT EXISTS file_data BYTEA")
+    cur.execute("ALTER TABLE resumes ADD COLUMN IF NOT EXISTS mime_type TEXT")
+    conn.commit()
+    cur.close()
+
+
 @app.route("/api/resumes", methods=["GET"])
 def api_get_resumes():
     conn = get_conn()
     try:
+        _ensure_resumes_columns(conn)
         cur = conn.cursor()
         cur.execute(
-            "SELECT name, LENGTH(COALESCE(content,'')), uploaded_at "
+            "SELECT name, LENGTH(COALESCE(content,'')), uploaded_at, mime_type "
             "FROM resumes ORDER BY uploaded_at DESC"
         )
         rows = cur.fetchall()
         cur.close()
         resumes = [
             {"name": r[0], "char_count": r[1] or 0,
-             "uploaded_at": r[2].isoformat() if r[2] else None}
+             "uploaded_at": r[2].isoformat() if r[2] else None,
+             "mime_type": r[3] or ""}
             for r in rows
         ]
         return jsonify({"resumes": resumes})
@@ -2087,10 +2167,16 @@ def api_upload_resume():
     filename = f.filename or ""
     ext      = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
+    MIME_TYPES = {
+        "pdf":  "application/pdf",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "txt":  "text/plain",
+    }
+
     try:
+        import io, psycopg2
         raw = f.read()
         if ext == "pdf":
-            import io
             from pypdf import PdfReader
             reader = PdfReader(io.BytesIO(raw))
             text   = "\n".join(
@@ -2100,7 +2186,6 @@ def api_upload_resume():
                 return jsonify({"error": "Could not extract text from PDF. "
                                          "Scanned/image PDFs are not supported."}), 422
         elif ext == "docx":
-            import io
             from docx import Document
             doc  = Document(io.BytesIO(raw))
             text = "\n".join(p.text for p in doc.paragraphs).strip()
@@ -2111,14 +2196,20 @@ def api_upload_resume():
         else:
             return jsonify({"error": "Unsupported file type. Use PDF, DOCX, or TXT."}), 400
 
+        mime_type = MIME_TYPES.get(ext, "application/octet-stream")
+
         conn = get_conn()
+        _ensure_resumes_columns(conn)
         cur  = conn.cursor()
         cur.execute(
-            """INSERT INTO resumes (name, content)
-               VALUES (%s, %s)
+            """INSERT INTO resumes (name, content, file_data, mime_type)
+               VALUES (%s, %s, %s, %s)
                ON CONFLICT (name) DO UPDATE
-                 SET content = EXCLUDED.content, uploaded_at = NOW()""",
-            (name, text),
+                 SET content = EXCLUDED.content,
+                     file_data = EXCLUDED.file_data,
+                     mime_type = EXCLUDED.mime_type,
+                     uploaded_at = NOW()""",
+            (name, text, psycopg2.Binary(raw), mime_type),
         )
         conn.commit()
         cur.close()
@@ -2126,6 +2217,31 @@ def api_upload_resume():
         return jsonify({"ok": True, "char_count": len(text)})
     except Exception as ex:
         return jsonify({"error": str(ex)}), 500
+
+
+@app.route("/api/resumes/<name>/file", methods=["GET"])
+def api_get_resume_file(name):
+    from flask import Response
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT file_data, mime_type, name FROM resumes WHERE name = %s", (name,))
+        row = cur.fetchone()
+        cur.close()
+        if not row or not row[0]:
+            return jsonify({"error": "File not found"}), 404
+        file_data = bytes(row[0])
+        mime_type = row[1] or "application/octet-stream"
+        safe_name = row[2].replace('"', '_')
+        return Response(
+            file_data,
+            mimetype=mime_type,
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}"'}
+        )
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
+    finally:
+        conn.close()
 
 
 @app.route("/api/resumes/<name>", methods=["GET"])
