@@ -1566,9 +1566,15 @@ async function rvOpen(name, mimeType) {
 
 function rvDownload() {
   if (!rvCurrentName) return;
+  const extMap = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "text/plain": ".txt"
+  };
+  const ext = (rvCurrentMime && extMap[rvCurrentMime]) ? extMap[rvCurrentMime] : "";
   const a = document.createElement("a");
   a.href     = "/api/resumes/" + encodeURIComponent(rvCurrentName) + "/file?dl=1";
-  a.download = rvCurrentName;
+  a.download = rvCurrentName + ext;
   a.click();
 }
 
