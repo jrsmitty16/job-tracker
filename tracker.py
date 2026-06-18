@@ -1411,7 +1411,7 @@ def run():
     log.info("=" * 60)
     log.info("Job Tracker starting")
 
-    config = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    config = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.exists() else {}
     state  = load_state()
 
     last_email_at: datetime | None = parse_date(state.get("last_email_at"))
