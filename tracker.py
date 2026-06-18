@@ -825,16 +825,20 @@ def passes_filters(job: dict, filters: dict) -> tuple[bool, str]:
             return False, f"title '{job['title']}' blocked by '{kw}'"
 
     if description and desc_must_include:
-        # Has description: allow broad title keywords, but description must contain AI terms
-        if title_must_include and not any(kw in title for kw in title_must_include):
+        # Has description: pass if description contains required keywords OR title matches
+        title_ok = not title_must_include or any(kw in title for kw in title_must_include)
+        desc_ok  = any(kw in description for kw in desc_must_include)
+        if not title_ok and not desc_ok:
+            return False, f"'{job['title']}' missing required keywords in title and description"
+    elif description and title_must_include:
+        # Has description but no desc filter: title must match
+        if not any(kw in title for kw in title_must_include):
             return False, f"title '{job['title']}' missing required keywords"
-        if not any(kw in description for kw in desc_must_include):
-            return False, f"description for '{job['title']}' missing AI keywords"
     else:
-        # No description: require specific AI title keywords to avoid false positives
+        # No description: require title or AI-specific keywords to avoid false positives
         specific = title_ai_specific if title_ai_specific else title_must_include
         if specific and not any(kw in title for kw in specific):
-            return False, f"title '{job['title']}' missing specific AI keywords (no description available)"
+            return False, f"title '{job['title']}' missing specific keywords (no description available)"
 
     # Location must match allowed list (empty location gets benefit of the doubt)
     allowed = [loc.lower() for loc in filters.get("location_allow", [])]
