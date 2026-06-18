@@ -1,0 +1,30 @@
+name: Job Tracker
+
+on:
+  schedule:
+    - cron: '0 8,14,20 * * *'   # runs at 8am, 2pm, 8pm UTC (4am, 10am, 4pm ET)
+  workflow_dispatch:              # also allows manual "Run Now" from GitHub UI
+
+jobs:
+  run-tracker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tracker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python tracker.py
